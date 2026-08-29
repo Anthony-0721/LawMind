@@ -560,3 +560,20 @@ def test_hotfix4_bare_invite_at_clause_boundary(message, expected_traffic):
 
     assert LawRiskFlag.NO_LAWYER in result.risk_flags
     assert (LawRiskFlag.TRAFFIC_ACCIDENT in result.risk_flags) is expected_traffic
+
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "喝酒开车，被交警查到",
+        "酒后驾车被交警查到",
+        "喝了酒开车被交警查到",
+        "醉酒驾驶被交警查到",
+        "开车喝酒被交警查到",
+    ],
+)
+def test_common_drunk_driving_colloquial_phrases_are_recognized(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert result.intent == LawIntent.DANGEROUS_DRIVING
