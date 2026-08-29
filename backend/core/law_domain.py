@@ -448,11 +448,19 @@ def _clause_text_at(text: str, offset: int) -> str:
 
 
 def _no_lawyer_matches(text: str) -> list[tuple[int, int]]:
-    """Return candidate no-lawyer phrase spans from the shared regex."""
-    return [
-        (match.start(), match.end())
-        for match in _NO_LAWYER_RE.finditer(text)
-    ]
+    """Return candidate no-lawyer phrase spans, matching each clause separately."""
+    matches: list[tuple[int, int]] = []
+    cursor = 0
+    for clause in _clauses(text):
+        clause_start = text.find(clause, cursor)
+        if clause_start == -1:
+            continue
+        cursor = clause_start + len(clause)
+        matches.extend(
+            (clause_start + match.start(), clause_start + match.end())
+            for match in _NO_LAWYER_RE.finditer(clause)
+        )
+    return matches
 
 
 def _is_negated_at(text: str, keyword: str, index: int) -> bool:

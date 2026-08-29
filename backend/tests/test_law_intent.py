@@ -542,3 +542,21 @@ def test_hotfix3_pending_invite_context_avoids_overmatch(message):
     result = make_law_recognizer().recognize_sync(message)
 
     assert LawRiskFlag.NO_LAWYER not in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_traffic"),
+    [
+        ("尚未请，发生交通事故", True),
+        ("没有请，发生交通事故", True),
+        ("尚未请但发生交通事故", True),
+        ("尚未请。", False),
+        ("没有请。", False),
+        ("尚未请，尚未发生交通事故", False),
+    ],
+)
+def test_hotfix4_bare_invite_at_clause_boundary(message, expected_traffic):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags
+    assert (LawRiskFlag.TRAFFIC_ACCIDENT in result.risk_flags) is expected_traffic
