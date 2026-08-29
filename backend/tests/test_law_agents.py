@@ -252,3 +252,32 @@ def test_other_risk_flags_route_to_domain_agents_not_escalation():
         )
         decision = orchestrator._route_decision(req)
         assert decision.primary_agent == expected, intent
+
+def test_critical_urgent_unknown_message_bypasses_clarification_and_escalates():
+    orchestrator = make_orchestrator()
+    req = Request(
+        message="非常着急，不知道怎么办",
+        user_id="test-user",
+        conv_id="test-conv",
+    )
+
+    result = asyncio.run(orchestrator.run(req))
+
+    assert result.primary_agent == AgentType.ESCALATION
+    assert result.escalated is True
+
+
+def test_low_confidence_other_with_detention_bypasses_clarification_and_escalates():
+    orchestrator = make_orchestrator()
+    req = make_request(
+        "不知道怎么办",
+        intent=LawIntent.OTHER,
+        urgency=UrgencyLevel.MEDIUM,
+        risk_flags=[LawRiskFlag.DETENTION],
+        confidence=0.0,
+    )
+
+    result = asyncio.run(orchestrator.run(req))
+
+    assert result.primary_agent == AgentType.ESCALATION
+    assert result.escalated is True

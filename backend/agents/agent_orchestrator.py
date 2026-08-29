@@ -12,7 +12,7 @@ LawMind 律所多 Agent 路由与编排
   - 结果由 Orchestrator 合并后返回
 
 升级机制：
-  - 刑事拘留、明确预约律师或紧急度 CRITICAL 时转人工升级
+  - 刑事拘留、即将开庭、明确预约律师或紧急度 CRITICAL 时转人工升级
 """
 import asyncio
 import inspect
@@ -977,8 +977,6 @@ class AgentOrchestrator:
         scores[AgentType.CIVIL] += min(0.45, civil_hits * 0.18)
         scores[AgentType.RECEPTION] += min(0.35, reception_hits * 0.12)
 
-        if LawRiskFlag.COURT_SOON in req.risk_flags:
-            scores[AgentType.CRIMINAL] += 0.2
         if LawRiskFlag.FILED in req.risk_flags or LawRiskFlag.PROSECUTION in req.risk_flags:
             scores[AgentType.CRIMINAL] += 0.8
         if LawRiskFlag.TRAFFIC_ACCIDENT in req.risk_flags or LawRiskFlag.INJURY in req.risk_flags:
@@ -1013,7 +1011,14 @@ class AgentOrchestrator:
 
     @staticmethod
     def _needs_clarification(req: Request) -> bool:
-        """低置信度且无明确意图时，先追问，避免误路由。"""
+        """低置信度且无明确意图时先追问，但高风险条件必须跳过澄清直接升级。"""
+        if (
+            req.urgency == UrgencyLevel.CRITICAL
+            or LawRiskFlag.DETENTION in req.risk_flags
+            or LawRiskFlag.COURT_SOON in req.risk_flags
+            or req.intent == LawIntent.LAWYER_APPOINTMENT
+        ):
+            return False
         if req.intent != LawIntent.OTHER:
             return False
         text = (req.message or "").strip()
