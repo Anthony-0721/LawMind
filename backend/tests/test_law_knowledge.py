@@ -1,4 +1,4 @@
-"""Task 5 review: law skills injection, seed data, knowledge migration and compliance."""
+"""Second Task 5 review: skill injection, escalation runtime prompt, Chroma cleanup and env compatibility."""
 import asyncio
 import importlib
 import json
@@ -42,20 +42,52 @@ CONTENT_SECTIONS = (
     "敏感信息保护",
 )
 
-SKILL_INJECTION_CASES = {
+SKILL_REQUIRED_KEYWORDS = {
     "criminal": [
-        "醉驾", "酒驾", "危险驾驶", "交警", "事故", "肇事", "逃逸",
-        "拘留", "警察", "刑事", "取保", "开庭", "犯罪", "涉嫌",
+        "看守所", "逮捕", "起诉", "辩护", "醉驾", "酒驾", "危险驾驶", "交警",
+        "肇事", "逃逸", "拘留", "警察", "刑事", "取保", "开庭", "犯罪", "涉嫌",
     ],
     "civil": [
-        "车祸", "责任认定", "保险", "工伤", "家暴", "离婚", "抚养权",
-        "劳动", "工资", "仲裁", "合同", "欠款", "借条", "纠纷",
+        "违法辞退", "辞退", "违约", "彩礼", "民间借贷", "借款", "抚养费",
+        "追尾", "车祸", "责任认定", "保险", "工伤", "家暴", "离婚", "劳动",
+        "工资", "仲裁", "合同", "欠款", "借条", "纠纷", "赔偿",
     ],
     "escalation": [
-        "找律师", "联系律师", "转人工", "人工", "预约", "咨询律师", "律师推荐",
+        "联系方式", "人工客服", "咨询记录", "找律师", "联系律师", "转人工",
+        "人工", "预约", "咨询律师", "律师推荐",
     ],
     "reception": [
-        "咨询", "收费", "流程", "地址", "时间", "预约", "法律服务", "帮助",
+        "代理费", "接待", "咨询", "收费", "流程", "地址", "时间", "预约",
+        "法律服务", "帮助",
+    ],
+}
+
+REPRESENTATIVE_PHRASES = {
+    "criminal": [
+        "我家人被关在看守所了，现在应该怎么办？",
+        "警察说他已经被逮捕，下一步可能是审查起诉。",
+        "希望找刑事辩护律师看看这个案件。",
+        "交警处理醉驾后可能涉嫌危险驾驶犯罪。",
+        "这次肇事逃逸后，家人正在申请取保候审。",
+        "目前已拘留，收到开庭通知，涉嫌犯罪。",
+    ],
+    "civil": [
+        "公司违法辞退我，我准备申请劳动仲裁。",
+        "合同违约和彩礼返还应该怎么处理？",
+        "民间借贷的借款还没有还，我有借条和聊天记录。",
+        "孩子抚养费、追尾责任认定和保险理赔都想问。",
+        "车祸后公司是否应该按工伤处理？",
+        "家暴离婚后，抚养权、工资和赔偿怎么主张？",
+    ],
+    "escalation": [
+        "我想留联系方式并转人工客服。",
+        "请帮我找律师预约咨询。",
+        "咨询律师推荐和咨询记录怎么查看？",
+    ],
+    "reception": [
+        "请问代理费和接待时间是什么？",
+        "我想咨询律所收费、流程和地址。",
+        "预约法律服务需要帮助。",
     ],
 }
 
@@ -69,6 +101,7 @@ OLD_CUSTOMER_TITLES = (
 )
 
 OLD_BRAND_PATTERN = re.compile("retired" + "brand", re.IGNORECASE)
+LEGACY_ENV_PREFIX = "RETIRED_"
 
 
 def _parse_front_matter(text: str):
@@ -89,11 +122,10 @@ def _parse_front_matter(text: str):
 
 
 def _fake_chromadb_module():
-    """Allow the test file to import knowledge_base without installing ChromaDB."""
     if "chromadb" in sys.modules:
         return sys.modules["chromadb"]
     fake = types.ModuleType("chromadb")
-    fake.Settings = object
+    fake.Settings = lambda **_kwargs: None
     fake.HttpClient = object
     fake.PersistentClient = object
     sys.modules["chromadb"] = fake
@@ -136,11 +168,9 @@ def test_seed_files_exist_and_have_expected_counts_ranges():
 
     brief_paths = {path.name for path in BRIEFS_DIR.glob("*.md")}
     assert brief_paths == EXPECTED_BRIEFS
-    assert (BRIEFS_DIR / "dangerous_driving.md").exists()
-    assert (BRIEFS_DIR / "criminal_defense.md").exists()
 
 
-def test_skill_files_have_required_front_matter_sections_and_broad_keywords():
+def test_skill_files_have_required_front_matter_sections_and_keywords():
     for folder, expected_agent in SKILLS.items():
         path = SKILLS_DIR / folder / "SKILL.md"
         assert path.exists(), path
@@ -155,11 +185,11 @@ def test_skill_files_have_required_front_matter_sections_and_broad_keywords():
         assert len(body) > 200, path
         for section in CONTENT_SECTIONS:
             assert section in body, f"{path} missing section: {section}"
-        for keyword in SKILL_INJECTION_CASES[expected_agent]:
+        for keyword in SKILL_REQUIRED_KEYWORDS[expected_agent]:
             assert keyword in meta["keywords"], f"{path} missing keyword: {keyword}"
 
 
-def test_common_first_turn_phrases_inject_matching_skills():
+def test_representative_skill_phrases_inject_matching_skills():
     manager = SkillManager(str(SKILLS_DIR))
     manager.load()
     assert manager.errors == []
@@ -170,11 +200,50 @@ def test_common_first_turn_phrases_inject_matching_skills():
         "escalation": "人工升级与留资规范",
         "reception": "律所前台接待规范",
     }
-    for agent_type, keywords in SKILL_INJECTION_CASES.items():
-        for keyword in keywords:
-            prompt = manager.prompt_for(f"{keyword}该怎么处理", agent_type)
-            assert expected_titles[agent_type] in prompt, (agent_type, keyword)
-            assert len(prompt) > 100, (agent_type, keyword)
+    for agent_type, phrases in REPRESENTATIVE_PHRASES.items():
+        for phrase in phrases:
+            prompt = manager.prompt_for(phrase, agent_type)
+            assert expected_titles[agent_type] in prompt, (agent_type, phrase)
+            assert len(prompt) > 100, (agent_type, phrase)
+
+    # Reception should also catch common criminal first-turn wording.
+    for phrase in REPRESENTATIVE_PHRASES["criminal"]:
+        prompt = manager.prompt_for(phrase, "reception")
+        assert "律所前台接待规范" in prompt, phrase
+
+
+def test_backward_compatible_env_fallback(monkeypatch):
+    import api.main as api_main
+
+    primary = "LAWMIND_SKILLS_DIR"
+    legacy = LEGACY_ENV_PREFIX + "SKILLS_DIR"
+    monkeypatch.setenv(primary, "/primary/skills")
+    monkeypatch.setenv(legacy, "/legacy/skills")
+    assert api_main._env_or_legacy(primary, "/default") == "/primary/skills"
+    monkeypatch.delenv(primary)
+    assert api_main._env_or_legacy(primary, "/default") == "/legacy/skills"
+    monkeypatch.delenv(legacy)
+    assert api_main._env_or_legacy(primary, "/default") == "/default"
+
+    primary_int = "LAWMIND_SKILLS_MAX_PROMPT_CHARS"
+    legacy_int = LEGACY_ENV_PREFIX + "SKILLS_MAX_PROMPT_CHARS"
+    monkeypatch.setenv(primary_int, "9000")
+    monkeypatch.setenv(legacy_int, "7000")
+    assert api_main._env_int_or_legacy(primary_int, 5000) == 9000
+    monkeypatch.delenv(primary_int)
+    assert api_main._env_int_or_legacy(primary_int, 5000) == 7000
+
+
+def test_agent_orchestrator_env_fallback(monkeypatch):
+    from agents.agent_orchestrator import _env_int
+
+    primary = "LAWMIND_TOOL_TRACE_MAX"
+    legacy = LEGACY_ENV_PREFIX + "TOOL_TRACE_MAX"
+    monkeypatch.setenv(primary, "777")
+    monkeypatch.setenv(legacy, "321")
+    assert _env_int(primary, 200) == 777
+    monkeypatch.delenv(primary)
+    assert _env_int(primary, 200) == 321
 
 
 def test_no_old_brand_or_real_like_pii_in_backend_seeds():
@@ -215,14 +284,24 @@ def test_loaders_return_law_documents_with_source_and_disclaimer():
     assert all("不构成正式法律意见" in doc["content"] for doc in brief_docs)
 
 
+def test_criminal_and_dangerous_driving_briefs_are_separate():
+    criminal = (BRIEFS_DIR / "criminal_defense.md").read_text(encoding="utf-8")
+    dangerous = (BRIEFS_DIR / "dangerous_driving.md").read_text(encoding="utf-8")
+    assert "刑事辩护领域摘要" in criminal
+    assert "醉驾" not in criminal
+    assert "危险驾驶" not in criminal
+    assert "危险驾驶领域摘要" in dangerous
+    assert "醉驾" in dangerous
+
+
 class FakeCollection:
     """Minimal ChromaDB-compatible collection fixture for unit tests."""
 
-    def __init__(self):
+    def __init__(self, count=0):
         self.added_documents = []
         self.added_metadatas = []
         self.added_ids = []
-        self.count_value = 0
+        self.count_value = count
 
     def count(self):
         return self.count_value
@@ -249,6 +328,30 @@ class FakeCollection:
             }]],
             "distances": [[0.1]],
         }
+
+
+class FakeChromaClient:
+    def __init__(self):
+        self.deleted = []
+        self.collection = FakeCollection(count=1)
+
+    def heartbeat(self):
+        return None
+
+    def delete_collection(self, name):
+        self.deleted.append(name)
+
+    def get_or_create_collection(self, name, metadata=None):
+        assert name == "law_knowledge_base"
+        return self.collection
+
+
+def test_knowledge_base_deletes_legacy_collection(monkeypatch):
+    kb_module = _load_knowledge_base_module()
+    client = FakeChromaClient()
+    monkeypatch.setattr(kb_module.chromadb, "HttpClient", lambda *args, **kwargs: client)
+    kb_module.KnowledgeBase(chroma_host="fake", chroma_port=1, chroma_path="fake")
+    assert client.deleted == ["knowledge_base"]
 
 
 def test_knowledge_base_uses_law_collection_and_loads_only_law_docs():

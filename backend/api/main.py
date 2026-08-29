@@ -50,6 +50,26 @@ _monitor      = None
 _evaluator    = None
 _skill_manager = None
 
+_LEGACY_ENV_PREFIX = "RETIRED_"
+
+
+def _env_or_legacy(name: str, default: str) -> str:
+    """Read a LAWMIND env value first, then fall back to the legacy deployment name."""
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return value
+    suffix = name[len("LAWMIND_"):] if name.startswith("LAWMIND_") else name
+    legacy = os.getenv(_LEGACY_ENV_PREFIX + suffix, default)
+    return legacy if legacy not in (None, "") else default
+
+
+def _env_int_or_legacy(name: str, default: int) -> int:
+    try:
+        return int(_env_or_legacy(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "")
     if not key:
@@ -89,10 +109,10 @@ async def lifespan(app: FastAPI):
     )
 
     # Skills：启动时从目录加载业务能力说明，并在 Agent 调用 LLM 时动态注入。
-    skills_dir = os.getenv("LAWMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm"))
+    skills_dir = _env_or_legacy("LAWMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm"))
     _skill_manager = SkillManager(
         root_dir=skills_dir,
-        max_prompt_chars=int(os.getenv("LAWMIND_SKILLS_MAX_PROMPT_CHARS", "5000")),
+        max_prompt_chars=_env_int_or_legacy("LAWMIND_SKILLS_MAX_PROMPT_CHARS", 5000),
     )
     _skill_manager.load()
 
@@ -642,8 +662,8 @@ async def _cli():
 
     cfg = _anthropic_cfg()
     skill_manager = SkillManager(
-        root_dir=os.getenv("LAWMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm")),
-        max_prompt_chars=int(os.getenv("LAWMIND_SKILLS_MAX_PROMPT_CHARS", "5000")),
+        root_dir=_env_or_legacy("LAWMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm")),
+        max_prompt_chars=_env_int_or_legacy("LAWMIND_SKILLS_MAX_PROMPT_CHARS", 5000),
     )
     skill_manager.load()
     orch = AgentOrchestrator(

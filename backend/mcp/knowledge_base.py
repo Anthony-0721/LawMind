@@ -167,6 +167,12 @@ class KnowledgeBase:
                 settings=chromadb.Settings(anonymized_telemetry=False),
             )
 
+        # 清理旧客服知识库集合，避免遗留内容参与律所检索。
+        try:
+            self._client.delete_collection("knowledge_base")
+        except Exception:
+            logger.info("旧知识库集合不存在或无需清理")
+
         # 使用服务端时不传 embedding_function，让服务端处理
         # 本地模式时也不传，使用 ChromaDB 默认的（会触发模型下载）
         self._collection = self._client.get_or_create_collection(

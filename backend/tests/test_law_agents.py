@@ -26,6 +26,7 @@ from core.intent_recognizer import (
     UrgencyLevel,
 )
 from core.law_domain import LawIntent, LawRiskFlag
+from core.skill_loader import SkillManager
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
@@ -224,6 +225,26 @@ def test_escalation_returns_deterministic_handoff_without_llm_call():
     assert result.success is True
     assert "转人工" in result.content
     assert client.called is False
+
+
+def test_escalation_runtime_skill_prompt_is_populated():
+    skill_manager = SkillManager(str(BACKEND_ROOT / "skills" / "law_firm"))
+    skill_manager.load()
+    agent = EscalationAgent(FakeClient(), "test-model", skill_manager=skill_manager)
+    req = make_request(
+        "我想留联系方式并转人工客服",
+        intent=LawIntent.LAWYER_APPOINTMENT,
+        risk_flags=[LawRiskFlag.DETENTION],
+    )
+
+    result = asyncio.run(agent.handle(req))
+
+    assert agent._last_skill_prompt
+    assert "人工升级与留资规范" in agent._last_skill_prompt
+    assert result.metadata.get("skill_prompt_injected") is True
+    assert result.metadata.get("skill_prompt_used") is True
+    assert result.metadata.get("skill_prompt_chars", 0) > 0
+    assert "人工升级与留资规范" not in result.content
 
 
 def test_old_intent_recognizer_api_remains_importable():

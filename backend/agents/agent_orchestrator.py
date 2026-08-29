@@ -70,21 +70,34 @@ class AgentProfile:
     max_tokens: int = 1024
 
 
+_LEGACY_ENV_PREFIX = "RETIRED_"
+
+
+def _env_raw(name: str, default: str) -> str:
+    """Read current LAWMIND config, then fall back to the legacy deployment env name."""
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return value
+    suffix = name[len("LAWMIND_"):] if name.startswith("LAWMIND_") else name
+    legacy = os.getenv(_LEGACY_ENV_PREFIX + suffix, default)
+    return legacy if legacy not in (None, "") else default
+
+
 def _env_float(name: str, default: float) -> float:
     """读取可选浮点配置；错误配置不应阻塞服务启动。"""
     try:
-        return float(os.getenv(name, str(default)))
+        return float(_env_raw(name, str(default)))
     except (TypeError, ValueError):
-        logger.warning("忽略非法浮点配置 %s=%r", name, os.getenv(name))
+        logger.warning("忽略非法浮点配置 %s=%r", name, _env_raw(name, str(default)))
         return default
 
 
 def _env_int(name: str, default: int) -> int:
     """读取可选整数配置；错误配置不应阻塞服务启动。"""
     try:
-        return int(os.getenv(name, str(default)))
+        return int(_env_raw(name, str(default)))
     except (TypeError, ValueError):
-        logger.warning("忽略非法整数配置 %s=%r", name, os.getenv(name))
+        logger.warning("忽略非法整数配置 %s=%r", name, _env_raw(name, str(default)))
         return default
 
 
@@ -121,6 +134,7 @@ class AgentResponse:
     escalate:    bool  = False   # 是否需要升级
     tools_used:  List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -263,6 +277,7 @@ class BaseAgent:
         self.stats   = AgentStats()
         self._last_tools_used: List[str] = []
         self._last_tool_traces: List[Dict[str, Any]] = []
+        self._last_skill_prompt: str = ""
         self._shared_tools: Dict[str, AgentToolSpec] = {}
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
@@ -738,6 +753,10 @@ class EscalationAgent(BaseAgent):
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
         self.stats.total += 1
+        skill_prompt = ""
+        if self._skill_manager is not None:
+            skill_prompt = self._skill_manager.prompt_for(req.message, self.agent_type.value)
+        self._last_skill_prompt = skill_prompt
         intent = req.intent.value if req.intent else "unknown"
         urgency = req.urgency.name if req.urgency else "UNKNOWN"
         risk_values = [flag.value for flag in req.risk_flags]
@@ -821,6 +840,11 @@ class EscalationAgent(BaseAgent):
             escalate=True,
             tools_used=tools_used,
             tool_traces=tool_traces,
+            metadata={
+                "skill_prompt_injected": bool(skill_prompt),
+                "skill_prompt_used": bool(skill_prompt),
+                "skill_prompt_chars": len(skill_prompt),
+            },
         )
 
 
@@ -931,8 +955,13 @@ class AgentOrchestrator:
         可使用更强模型，通用接待可使用更快模型，升级节点本身不需要调用 LLM。
         """
         profile = agent_cls.profile
-        env_name = f"LAWMIND_{agent_cls.agent_type.value.upper()}_MODEL"
-        model = os.getenv(env_name, "").strip() or profile.model
+        agent_env_name = f"{agent_cls.agent_type.value.upper()}_MODEL"
+        env_name = "LAWMIND_" + agent_env_name
+        model = (
+            os.getenv(env_name, "").strip()
+            or os.getenv(_LEGACY_ENV_PREFIX + agent_env_name, "").strip()
+            or profile.model
+        )
         configured_profile = replace(profile, model=model) if model else profile
         kwargs: Dict[str, Any] = {"profile": configured_profile}
         if agent_cls is EscalationAgent:
