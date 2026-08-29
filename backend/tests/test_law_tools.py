@@ -469,3 +469,41 @@ def test_contract_intents_are_plain_strings():
     assert type(build_reception_summary(req, {})["intent"]) is str
     assert type(build_handoff_summary(req, {})["intent"]) is str
     assert type(create_consultation_record(req, {})["legal_domain"]) is str
+
+
+def test_create_consultation_record_uses_args_legal_domain():
+    req = make_request(intent=LawIntent.DANGEROUS_DRIVING)
+
+    draft = create_consultation_record(req, {"legal_domain": "civil"})
+
+    assert draft["legal_domain"] == "civil"
+    assert type(draft["legal_domain"]) is str
+
+
+def test_pii_is_redacted_recursively_in_nested_lists():
+    payload = {
+        "contact": [
+            {
+                "name": "张三",
+                "phone": "13800138000",
+                "wechat": "wx-zhangsan",
+                "email": "a@example.com",
+                "id_number": "110101199001011234",
+                "identity_number": "110101199001011234",
+                "nested": [{"name": "李四", "phone": "13900139000"}],
+            }
+        ],
+        "city": "上海",
+    }
+
+    redacted = BaseAgent._redact_pii(payload)
+
+    assert redacted["contact"][0]["name"] == "***"
+    assert redacted["contact"][0]["phone"] == "***"
+    assert redacted["contact"][0]["wechat"] == "***"
+    assert redacted["contact"][0]["email"] == "***"
+    assert redacted["contact"][0]["id_number"] == "***"
+    assert redacted["contact"][0]["identity_number"] == "***"
+    assert redacted["contact"][0]["nested"][0]["name"] == "***"
+    assert redacted["contact"][0]["nested"][0]["phone"] == "***"
+    assert redacted["city"] == "上海"

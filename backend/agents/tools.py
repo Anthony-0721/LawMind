@@ -108,14 +108,30 @@ def _domain_name(req: Request) -> str:
     return "other"
 
 
-def _legal_domain_value(req: Request) -> str:
-    """优先使用实体抽取的 legal_domain，其次使用已识别意图。"""
-    entity_value = req.entities.get("legal_domain")
-    if entity_value:
-        return str(_first_entity(req, "legal_domain", req.intent))
-    if req.intent is not None:
-        return req.intent.value
-    return "unknown"
+def resolve_legal_domain(
+    req: Request,
+    args: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Resolve legal domain with entity -> args -> intent precedence."""
+    entity_value = _first_entity(req, "legal_domain", None)
+    if entity_value not in (None, ""):
+        return str(entity_value)
+    if args:
+        arg_value = args.get("legal_domain")
+        if arg_value not in (None, ""):
+            return str(arg_value)
+    request_value = getattr(req, "legal_domain", None)
+    if request_value not in (None, ""):
+        return str(request_value)
+    return _intent_value(req)
+
+
+def _legal_domain_value(
+    req: Request,
+    args: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Backward-compatible wrapper for the shared legal-domain resolver."""
+    return resolve_legal_domain(req, args)
 
 
 def _required_fields_for(req: Request) -> List[str]:
@@ -504,7 +520,7 @@ def _merge_request_contact(req: Request, args: Dict[str, Any]) -> Dict[str, Any]
         if not merged.get("case_stage") and source.get("case_stage"):
             merged["case_stage"] = source.get("case_stage")
     entities = getattr(req, "entities", None) or {}
-    for key in ("name", "phone", "contact_name", "contact_phone", "city", "preferred_time", "consent", "case_stage"):
+    for key in ("name", "phone", "contact_name", "contact_phone", "legal_domain", "city", "preferred_time", "consent", "case_stage"):
         if key == "consent":
             if key not in merged:
                 value = getattr(req, key, None)
@@ -605,7 +621,7 @@ def create_consultation_record(
     return {
         "request_id": req.request_id,
         "user_id": req.user_id,
-        "legal_domain": _legal_domain_value(req),
+        "legal_domain": resolve_legal_domain(req, effective_args),
         "risk_flags": risk_flags,
         "facts": dict(req.entities or {}),
         "risk_analysis": risk_analysis,

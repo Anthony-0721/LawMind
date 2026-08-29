@@ -36,6 +36,7 @@ from agents.tools import (
     criminal_tools,
     escalation_tools,
     reception_tools,
+    resolve_legal_domain,
     validate_contact,
 )
 from core.intent_recognizer import LawIntentRecognizer, UrgencyLevel
@@ -141,6 +142,7 @@ class Request:
     name: str = ""
     phone: str = ""
     contact: Dict[str, Any] = field(default_factory=dict)
+    legal_domain: str = ""
     city: str = ""
     preferred_time: str = ""
     case_stage: str = ""
@@ -178,6 +180,7 @@ def _request_contact_args(req: Request) -> Dict[str, Any]:
     city = _entity_value(req, "city", "")
     preferred_time = _entity_value(req, "preferred_time", "")
     case_stage = _entity_value(req, "case_stage", "")
+    legal_domain = _entity_value(req, "legal_domain", "")
     consent_raw = getattr(req, "consent", False)
     if not consent_raw:
         consent_raw = _entity_value(req, "consent", "")
@@ -199,6 +202,7 @@ def _request_contact_args(req: Request) -> Dict[str, Any]:
         "city": city,
         "preferred_time": preferred_time,
         "case_stage": case_stage,
+        "legal_domain": legal_domain,
     }
 
 
@@ -270,19 +274,27 @@ class BaseAgent:
 
     @staticmethod
     def _redact_pii(payload: Any) -> Any:
-        """Return a copy with PII fields masked for tool traces."""
-        if not isinstance(payload, dict):
-            return payload
-        redacted: Dict[str, Any] = {}
-        sensitive_keys = {"contact_name", "name", "phone", "contact_phone"}
-        for key, value in payload.items():
-            if key == "contact" and isinstance(value, dict):
-                redacted[key] = BaseAgent._redact_pii(value)
-            elif key in sensitive_keys:
-                redacted[key] = "***"
-            else:
-                redacted[key] = value
-        return redacted
+        """Return a copy with PII masked recursively in dicts and lists."""
+        sensitive_keys = {
+            "contact_name",
+            "name",
+            "phone",
+            "contact_phone",
+            "wechat",
+            "email",
+            "id_number",
+            "identity_number",
+        }
+        if isinstance(payload, dict):
+            return {
+                key: "***" if key in sensitive_keys else BaseAgent._redact_pii(value)
+                for key, value in payload.items()
+            }
+        if isinstance(payload, list):
+            return [BaseAgent._redact_pii(item) for item in payload]
+        if isinstance(payload, tuple):
+            return tuple(BaseAgent._redact_pii(item) for item in payload)
+        return payload
 
     async def _invoke_available_tool(
         self,
@@ -741,11 +753,11 @@ class EscalationAgent(BaseAgent):
         tools_used: List[str] = []
         tool_traces: List[Dict[str, Any]] = []
         recommended_lawyers: List[Dict[str, Any]] = []
+        contact_args = _request_contact_args(req)
+        legal_domain = resolve_legal_domain(req, contact_args)
 
         if "recommend_lawyer" in tools:
-            recommend_args = {
-                "legal_domain": req.intent.value if req.intent else "unknown"
-            }
+            recommend_args = {"legal_domain": legal_domain}
             recommend_result, trace = await self._invoke_available_tool(
                 "recommend_lawyer",
                 req,
@@ -753,14 +765,18 @@ class EscalationAgent(BaseAgent):
                 "escalation-recommend",
             )
             if trace is not None:
-                tools_used.append("recommend_lawyer")
                 tool_traces.append(trace)
-                if isinstance(recommend_result, list):
-                    recommended_lawyers = recommend_result
-                elif isinstance(recommend_result, dict):
-                    recommended_lawyers = list(recommend_result.get("lawyers") or [])
+                recommend_success = (
+                    trace.get("success") is not False
+                    and trace.get("result_success") is not False
+                )
+                if recommend_success:
+                    tools_used.append("recommend_lawyer")
+                    if isinstance(recommend_result, list):
+                        recommended_lawyers = recommend_result
+                    elif isinstance(recommend_result, dict):
+                        recommended_lawyers = list(recommend_result.get("lawyers") or [])
 
-        contact_args = _request_contact_args(req)
         if "build_handoff_summary" in tools:
             _, trace = await self._invoke_available_tool(
                 "build_handoff_summary",
@@ -769,8 +785,9 @@ class EscalationAgent(BaseAgent):
                 "escalation-handoff-summary",
             )
             if trace is not None:
-                tools_used.append("build_handoff_summary")
                 tool_traces.append(trace)
+                if trace.get("success") is not False and trace.get("result_success") is not False:
+                    tools_used.append("build_handoff_summary")
 
         contact_valid = bool(contact_args.get("name") and contact_args.get("phone"))
         if contact_valid:
@@ -779,7 +796,7 @@ class EscalationAgent(BaseAgent):
         if contact_valid and contact_args.get("consent") and "create_consultation_record" in tools:
             create_args = dict(contact_args)
             create_args["recommended_lawyers"] = recommended_lawyers
-            create_args["legal_domain"] = req.intent.value if req.intent else "unknown"
+            create_args["legal_domain"] = legal_domain
             _, trace = await self._invoke_available_tool(
                 "create_consultation_record",
                 req,
@@ -787,8 +804,9 @@ class EscalationAgent(BaseAgent):
                 "escalation-create-record",
             )
             if trace is not None:
-                tools_used.append("create_consultation_record")
                 tool_traces.append(trace)
+                if trace.get("success") is not False and trace.get("result_success") is not False:
+                    tools_used.append("create_consultation_record")
 
         self._last_tools_used = tools_used
         self._last_tool_traces = tool_traces

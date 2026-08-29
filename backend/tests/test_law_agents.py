@@ -83,6 +83,7 @@ def make_request(
     city: str = "",
     preferred_time: str = "",
     consent: bool = False,
+    entities=None,
 ) -> Request:
     return Request(
         message=message,
@@ -98,6 +99,7 @@ def make_request(
         city=city,
         preferred_time=preferred_time,
         consent=consent,
+        entities=dict(entities or {}),
     )
 
 
@@ -322,8 +324,12 @@ def test_low_confidence_other_with_detention_bypasses_clarification_and_escalate
 
 
 def test_escalation_handle_calls_tools_and_creates_record_when_complete():
+    class FakeLawyerService:
+        def recommend(self, legal_domain):
+            return [{"id": "lawyer-1", "legal_domain": legal_domain}]
+
     client = FakeClient()
-    agent = EscalationAgent(client, "test-model")
+    agent = EscalationAgent(client, "test-model", lawyer_service=FakeLawyerService())
     req = make_request(
         "我愿意留资并预约律师",
         intent=LawIntent.LAWYER_APPOINTMENT,
@@ -355,8 +361,10 @@ def test_escalation_does_not_create_record_without_complete_contact_and_consent(
 
     result = asyncio.run(agent.handle(req))
 
-    assert result.tools_used == ["recommend_lawyer", "build_handoff_summary"]
-    assert "create_consultation_record" not in [trace["tool_name"] for trace in result.tool_traces]
+    assert result.tools_used == ["build_handoff_summary"]
+    trace_names = [trace["tool_name"] for trace in result.tool_traces]
+    assert "recommend_lawyer" in trace_names
+    assert "create_consultation_record" not in trace_names
     assert client.called is False
 
 
@@ -422,3 +430,37 @@ def test_agent_orchestrator_injects_lawyer_service_into_escalation_agent():
     agent = orchestrator._best_agent(AgentType.ESCALATION)
     assert agent is not None
     assert agent._lawyer_service is service
+
+
+def test_escalation_uses_entities_legal_domain_override():
+    class FakeLawyerService:
+        def __init__(self):
+            self.seen = None
+
+        def recommend(self, legal_domain):
+            self.seen = legal_domain
+            return [{"id": "lawyer-1", "legal_domain": legal_domain}]
+
+    service = FakeLawyerService()
+    agent = EscalationAgent(FakeClient(), "test-model", lawyer_service=service)
+    req = make_request(
+        "刑事拘留但需要民事律师",
+        intent=LawIntent.CRIMINAL_DEFENSE,
+        entities={"legal_domain": ["civil"]},
+    )
+
+    result = asyncio.run(agent.handle(req))
+
+    assert service.seen == "civil"
+    assert "recommend_lawyer" in result.tools_used
+    assert "recommend_lawyer" in [trace["tool_name"] for trace in result.tool_traces]
+
+
+def test_failed_escalation_tool_is_not_counted_as_used():
+    agent = EscalationAgent(FakeClient(), "test-model")
+    req = make_request("帮我预约律师", intent=LawIntent.LAWYER_APPOINTMENT)
+
+    result = asyncio.run(agent.handle(req))
+
+    assert "recommend_lawyer" not in result.tools_used
+    assert "recommend_lawyer" in [trace["tool_name"] for trace in result.tool_traces]
