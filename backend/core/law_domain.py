@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class LawIntent(str, Enum):
@@ -41,12 +41,21 @@ class LawIntentResult:
 
     intent: LawIntent
     intent_group: str
-    urgency: str
+    urgency: Any
     risk_flags: List[LawRiskFlag]
     entities: Dict[str, List[str]]
     confidence: float
     source_scores: Dict[str, float] = field(default_factory=dict)
     latency_ms: float = 0.0
+
+    @property
+    def urgency_level(self) -> Any:
+        """Return the existing UrgencyLevel enum for the string/named urgency."""
+        from core.intent_recognizer import UrgencyLevel
+
+        if isinstance(self.urgency, UrgencyLevel):
+            return self.urgency
+        return UrgencyLevel[self.urgency]
 
 
 LAW_INTENT_GROUPS: Dict[LawIntent, str] = {
@@ -295,14 +304,38 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
 }
 
 
+_NEGATION_MARKERS = ("没有", "没", "未", "尚未", "不", "无", "并非", "不是")
+
+
+def _is_negated_at(text: str, keyword: str, index: int) -> bool:
+    context = text[max(0, index - 6):index]
+    return any(marker in context for marker in _NEGATION_MARKERS)
+
+
+def has_unnegated_keyword(text: str, keyword: str) -> bool:
+    """Return True when keyword occurs at least once without a nearby negation."""
+    index = text.find(keyword)
+    while index != -1:
+        if not _is_negated_at(text, keyword, index):
+            return True
+        index = text.find(keyword, index + 1)
+    return False
+
+
 def detect_law_risk_flags(message: str) -> List[LawRiskFlag]:
-    """Return every risk flag whose keyword is present in the message."""
+    """Return every non-negated risk flag whose keyword is present."""
     text = str(message or "")
-    return [
-        flag
-        for flag, keywords in LAW_RISK_RULES.items()
-        if any(keyword in text for keyword in keywords)
-    ]
+    flags: List[LawRiskFlag] = []
+    for flag, keywords in LAW_RISK_RULES.items():
+        for keyword in keywords:
+            if flag is LawRiskFlag.NO_LAWYER:
+                detected = keyword in text
+            else:
+                detected = has_unnegated_keyword(text, keyword)
+            if detected:
+                flags.append(flag)
+                break
+    return flags
 
 
 class LawEntityExtractor:
@@ -345,7 +378,7 @@ class LawEntityExtractor:
             "incident_time": self._unique(self._INCIDENT_TIME_RE.findall(text)),
             "city": self._unique(self._CITY_RE.findall(text)),
             "blood_alcohol": blood_alcohol,
-            "traffic_accident": ["yes"] if LawRiskFlag.TRAFFIC_ACCIDENT in risk_flags else ["no"],
+            "traffic_accident": ["yes"] if LawRiskFlag.TRAFFIC_ACCIDENT in risk_flags else [],
             "injury_or_death": self._injury_or_death(text),
             "detention_status": self._detention_status(text),
             "has_lawyer": self._has_lawyer(text, risk_flags),
@@ -374,19 +407,25 @@ class LawEntityExtractor:
 
     @staticmethod
     def _case_stage(text: str) -> List[str]:
-        if "审查起诉" in text:
+        if "审查起诉" in text and has_unnegated_keyword(text, "审查起诉"):
             return ["审查起诉"]
-        if any(item in text for item in ("提起公诉", "检察院起诉", "起诉")):
+        if any(
+            item in text and has_unnegated_keyword(text, item)
+            for item in ("提起公诉", "检察院起诉", "起诉")
+        ):
             return ["起诉"]
-        if "开庭" in text:
+        if "开庭" in text and has_unnegated_keyword(text, "开庭"):
             return ["开庭"]
-        if "立案" in text:
+        if "立案" in text and has_unnegated_keyword(text, "立案"):
             return ["立案"]
-        if "取保候审" in text:
+        if "取保候审" in text and has_unnegated_keyword(text, "取保候审"):
             return ["取保候审"]
-        if any(item in text for item in ("刑事拘留", "被拘留", "拘留")):
+        if any(
+            item in text and has_unnegated_keyword(text, item)
+            for item in ("刑事拘留", "被拘留", "拘留")
+        ):
             return ["拘留"]
-        if "侦查" in text:
+        if "侦查" in text and has_unnegated_keyword(text, "侦查"):
             return ["侦查"]
         return []
 
@@ -394,6 +433,8 @@ class LawEntityExtractor:
     def _party_role(text: str) -> List[str]:
         if any(item in text for item in ("家人", "家属")):
             return ["家属"]
+        if "当事人" in text:
+            return ["当事人"]
         if "朋友" in text:
             return ["朋友"]
         if any(item in text for item in ("配偶", "妻子", "丈夫", "老婆")):
@@ -405,18 +446,28 @@ class LawEntityExtractor:
     @staticmethod
     def _injury_or_death(text: str) -> List[str]:
         return LawEntityExtractor._unique(
-            [item for item in ("重伤", "轻伤", "受伤", "死亡", "骨折", "伤残") if item in text]
+            [
+                item
+                for item in ("重伤", "轻伤", "受伤", "死亡", "骨折", "伤残")
+                if item in text and has_unnegated_keyword(text, item)
+            ]
         )
 
     @staticmethod
     def _detention_status(text: str) -> List[str]:
-        if "取保候审" in text:
+        if "取保候审" in text and has_unnegated_keyword(text, "取保候审"):
             return ["取保候审"]
-        if any(item in text for item in ("释放", "出来了")):
+        if any(
+            item in text and has_unnegated_keyword(text, item)
+            for item in ("释放", "出来了")
+        ):
             return ["释放"]
-        if "刑事拘留" in text:
+        if "刑事拘留" in text and has_unnegated_keyword(text, "刑事拘留"):
             return ["刑事拘留"]
-        if any(item in text for item in ("被拘留", "拘留", "羁押", "看守所")):
+        if any(
+            item in text and has_unnegated_keyword(text, item)
+            for item in ("被拘留", "拘留", "羁押", "看守所")
+        ):
             return ["拘留"]
         return []
 

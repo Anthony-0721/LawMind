@@ -23,18 +23,22 @@ from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
 
+from core import law_domain as law_domain
+
 from core.law_domain import (
     LAW_INTENT_GROUPS,
     LAW_PATTERNS,
     LAW_PATTERN_PRIORITY,
-    LAW_RISK_RULES,
     LAW_TEMPLATES,
     LawEntityExtractor,
     LawIntent,
     LawIntentResult,
     LawRiskFlag,
     detect_law_risk_flags,
+    has_unnegated_keyword,
 )
+
+LAW_RISK_RULES = law_domain.LAW_RISK_RULES
 
 logger = logging.getLogger(__name__)
 
@@ -524,23 +528,21 @@ class IntentRecognizer:
 class LawIntentRecognizer:
     """Offline, deterministic recognizer for the law-firm consultation domain.
 
-    This class intentionally does not call an external LLM: Task 2 only needs
-    local templates, risk rules and entity extraction. ``api_key`` and ``model``
-    are accepted so the call site can be migrated from the old recognizer
-    without changing constructor usage.
+    Production path: Task 3 will switch AgentOrchestrator and api/main.py to
+    this LawIntentRecognizer. The old IntentRecognizer remains available until
+    that transition. This class intentionally does not call an external LLM:
+    Task 2 only needs local templates, risk rules and entity extraction.
+    ``api_key`` and ``model`` are accepted for call-site compatibility.
     """
 
     def __init__(
         self,
         api_key: str,
         model: str = "test-model",
-        base_url: Optional[str] = None,
     ):
         self.api_key = api_key
         self.model = model
-        self.base_url = base_url
         self.entity_extractor = LawEntityExtractor()
-        self.confidence_threshold = 0.5
 
     async def recognize(
         self,
@@ -584,8 +586,16 @@ class LawIntentRecognizer:
         for intent in LAW_PATTERN_PRIORITY:
             if intent is LawIntent.OTHER:
                 continue
-            pattern_hits = [item for item in LAW_PATTERNS[intent] if item in message]
-            template_hits = [item for item in LAW_TEMPLATES[intent] if item in message]
+            pattern_hits = [
+                item
+                for item in LAW_PATTERNS[intent]
+                if item in message and has_unnegated_keyword(message, item)
+            ]
+            template_hits = [
+                item
+                for item in LAW_TEMPLATES[intent]
+                if item in message and has_unnegated_keyword(message, item)
+            ]
             if pattern_hits or template_hits:
                 hit_count = len(pattern_hits) + len(template_hits)
                 scores[intent] = 0.6 + min(0.35, 0.1 * (hit_count - 1))
@@ -603,13 +613,18 @@ class LawIntentRecognizer:
         return best, best_score, {"pattern": best_score, "llm": 0.0, "embedding": 0.0}
 
     @staticmethod
-    def _urgency(message: str, risk_flags: List[LawRiskFlag]) -> str:
-        if "紧急" in message or "非常着急" in message:
-            return "CRITICAL"
+    def _urgency(message: str, risk_flags: List[LawRiskFlag]) -> UrgencyLevel:
+        if (
+            has_unnegated_keyword(message, "紧急")
+            or has_unnegated_keyword(message, "非常着急")
+        ):
+            return UrgencyLevel.CRITICAL
         if LawRiskFlag.DETENTION in risk_flags:
-            return "HIGH"
+            return UrgencyLevel.CRITICAL
         if LawRiskFlag.COURT_SOON in risk_flags:
-            return "HIGH"
+            return UrgencyLevel.HIGH
+        if LawRiskFlag.NO_LAWYER in risk_flags:
+            return UrgencyLevel.HIGH
         if any(
             flag in risk_flags
             for flag in (
@@ -619,8 +634,8 @@ class LawIntentRecognizer:
                 LawRiskFlag.PROSECUTION,
             )
         ):
-            return "HIGH"
-        return "MEDIUM"
+            return UrgencyLevel.HIGH
+        return UrgencyLevel.MEDIUM
 
     @staticmethod
     def _clean_text(value: Any) -> str:

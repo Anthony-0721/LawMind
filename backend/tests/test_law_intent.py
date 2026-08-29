@@ -5,6 +5,7 @@ from core.intent_recognizer import (
     LAW_RISK_RULES,
     LAW_TEMPLATES,
     LawIntentRecognizer,
+    UrgencyLevel,
 )
 from core.law_domain import (
     LawEntityExtractor,
@@ -28,7 +29,8 @@ def test_dangerous_driving_result_contract():
     assert isinstance(result, LawIntentResult)
     assert result.intent == LawIntent.DANGEROUS_DRIVING
     assert result.intent_group == "criminal"
-    assert result.urgency in {"HIGH", "CRITICAL"}
+    assert result.urgency == UrgencyLevel.CRITICAL
+    assert result.urgency_level == UrgencyLevel.CRITICAL
     assert result.risk_flags == [
         LawRiskFlag.DETENTION,
         LawRiskFlag.NO_LAWYER,
@@ -44,6 +46,21 @@ def test_dangerous_driving_result_contract():
     assert result.entities["has_lawyer"] == ["no"]
 
 
+def test_high_risk_detention():
+    result = make_law_recognizer().recognize_sync("家人已经被刑事拘留")
+
+    assert LawRiskFlag.DETENTION in result.risk_flags
+    assert result.urgency == UrgencyLevel.CRITICAL
+    assert result.urgency_level == UrgencyLevel.CRITICAL
+
+
+def test_pure_detention_without_extra_urgency_keywords_is_critical():
+    result = make_law_recognizer().recognize_sync("目前处于刑事拘留状态")
+
+    assert LawRiskFlag.DETENTION in result.risk_flags
+    assert result.urgency == UrgencyLevel.CRITICAL
+
+
 def test_criminal_defense_detects_detention_court_and_no_lawyer_risk():
     result = make_law_recognizer().recognize_sync(
         "家人已经被刑事拘留，明天开庭，目前还没有委托律师"
@@ -55,7 +72,15 @@ def test_criminal_defense_detects_detention_court_and_no_lawyer_risk():
         LawRiskFlag.COURT_SOON,
         LawRiskFlag.NO_LAWYER,
     }
-    assert result.urgency == "HIGH"
+    assert result.urgency == UrgencyLevel.CRITICAL
+
+
+def test_no_lawyer_elevates_urgency_to_high():
+    result = make_law_recognizer().recognize_sync("现在还没有请律师")
+
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags
+    assert result.urgency == UrgencyLevel.HIGH
+    assert result.urgency_level == UrgencyLevel.HIGH
 
 
 @pytest.mark.parametrize(
@@ -73,6 +98,25 @@ def test_required_risk_flags_are_detected(message, risk_flag):
     result = make_law_recognizer().recognize_sync(message)
 
     assert risk_flag in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    ("message", "risk_flag"),
+    [
+        ("家人没有被刑事拘留", LawRiskFlag.DETENTION),
+        ("没有发生交通事故", LawRiskFlag.TRAFFIC_ACCIDENT),
+    ],
+)
+def test_negated_risk_phrases_do_not_trigger(message, risk_flag):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert risk_flag not in result.risk_flags
+
+
+def test_negated_urgency_does_not_escalate():
+    result = make_law_recognizer().recognize_sync("不紧急")
+
+    assert result.urgency == UrgencyLevel.MEDIUM
 
 
 @pytest.mark.parametrize(
@@ -118,6 +162,32 @@ def test_law_entity_extractor_extracts_drunk_driving_entities():
     ]
 
 
+def test_unknown_traffic_accident_entity_is_empty():
+    entities = LawEntityExtractor().extract("我想咨询离婚")
+
+    assert entities["traffic_accident"] == []
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_roles"),
+    [
+        ("当事人想咨询合同纠纷", ["当事人"]),
+        ("本人想咨询离婚", ["本人"]),
+    ],
+)
+def test_party_role_supports_common_first_person_values(message, expected_roles):
+    entities = LawEntityExtractor().extract(message)
+
+    assert entities["party_role"] == expected_roles
+
+
+def test_urgency_uses_existing_enum_type():
+    result = make_law_recognizer().recognize_sync("家人已经被刑事拘留")
+
+    assert isinstance(result.urgency, UrgencyLevel)
+    assert result.urgency_level is UrgencyLevel.CRITICAL
+
+
 def test_law_pattern_data_covers_all_enum_domains():
     for intent in LawIntent:
         if intent is LawIntent.OTHER:
@@ -143,3 +213,17 @@ def test_generic_compensation_does_not_imply_traffic_accident_risk():
     result = make_law_recognizer().recognize_sync("公司拖欠工资，应该赔偿我")
 
     assert LawRiskFlag.TRAFFIC_ACCIDENT not in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    ("message", "field", "expected"),
+    [
+        ("家人没有被刑事拘留", "detention_status", []),
+        ("没有立案", "case_stage", []),
+        ("没有受伤", "injury_or_death", []),
+    ],
+)
+def test_negated_phrases_leave_entity_fields_unknown(message, field, expected):
+    entities = LawEntityExtractor().extract(message)
+
+    assert entities[field] == expected
