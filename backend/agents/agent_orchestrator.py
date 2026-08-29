@@ -1,19 +1,18 @@
 """
-亮点：多 Agent 路由与编排
 
-核心问题：多 Agent 情况下如何做 Routing？
+LawMind 律所多 Agent 路由与编排
 
 路由策略（三层决策）：
-  1. 意图路由 —— 根据 IntentCategory 直接映射到专属 Agent
+  1. 意图路由 —— 根据 LawIntent 直接映射到律所 Agent
   2. 性能路由 —— 同类 Agent 有多个时，选成功率最高、延迟最低的
-  3. 降级路由 —— 专属 Agent 不可用时，自动降级到 GeneralAgent
+  3. 降级路由 —— 刑事/民事专属 Agent 不可用时降级到 ReceptionAgent
 
 并行协作：
-  - 复杂问题（如"技术问题 + 账单问题"）可同时派发给多个 Agent
+  - 同一问题同时涉及刑事与民事领域时，可并行派发
   - 结果由 Orchestrator 合并后返回
 
 升级机制：
-  - Agent 置信度低于阈值 → 自动升级到更高级 Agent 或转人工
+  - 刑事拘留、即将开庭、明确预约律师或紧急度 CRITICAL 时转人工升级
 """
 import asyncio
 import inspect
@@ -32,13 +31,16 @@ from anthropic import AsyncAnthropic
 
 from agents.tools import (
     AgentToolSpec,
-    build_shared_rag_tools,
-    billing_tools,
-    escalation_tools,
-    general_tools,
-    technical_tools,
+    build_shared_law_rag_tools,
+    civil_tools,
+    criminal_tools,
+    build_escalation_tools,
+    reception_tools,
+    resolve_legal_domain,
+    validate_contact,
 )
-from core.intent_recognizer import IntentCategory, IntentRecognizer, UrgencyLevel
+from core.intent_recognizer import LawIntentRecognizer, UrgencyLevel
+from core.law_domain import LawIntent, LawRiskFlag
 from core.llm_utils import extract_text_content
 
 logger = logging.getLogger(__name__)
@@ -47,10 +49,10 @@ logger = logging.getLogger(__name__)
 # ── 数据结构 ──────────────────────────────────────────────────────────────────
 
 class AgentType(Enum):
-    GENERAL   = "general"    # 通用客服
-    TECHNICAL = "technical"  # 技术支持
-    BILLING   = "billing"    # 账单/退款
-    ESCALATION = "escalation" # 人工升级与交接
+    RECEPTION  = "reception"   # 律所接待与领域判断
+    CRIMINAL   = "criminal"    # 刑事辩护/醉驾风险
+    CIVIL      = "civil"       # 民事法律咨询
+    ESCALATION = "escalation"  # 人工升级与留资交接
 
 
 @dataclass(frozen=True)
@@ -68,21 +70,34 @@ class AgentProfile:
     max_tokens: int = 1024
 
 
+_LEGACY_ENV_PREFIX = "RETIRED_"
+
+
+def _env_raw(name: str, default: str) -> str:
+    """Read current LAWMIND config, then fall back to the legacy deployment env name."""
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return value
+    suffix = name[len("LAWMIND_"):] if name.startswith("LAWMIND_") else name
+    legacy = os.getenv(_LEGACY_ENV_PREFIX + suffix, default)
+    return legacy if legacy not in (None, "") else default
+
+
 def _env_float(name: str, default: float) -> float:
     """读取可选浮点配置；错误配置不应阻塞服务启动。"""
     try:
-        return float(os.getenv(name, str(default)))
+        return float(_env_raw(name, str(default)))
     except (TypeError, ValueError):
-        logger.warning("忽略非法浮点配置 %s=%r", name, os.getenv(name))
+        logger.warning("忽略非法浮点配置 %s=%r", name, _env_raw(name, str(default)))
         return default
 
 
 def _env_int(name: str, default: int) -> int:
     """读取可选整数配置；错误配置不应阻塞服务启动。"""
     try:
-        return int(os.getenv(name, str(default)))
+        return int(_env_raw(name, str(default)))
     except (TypeError, ValueError):
-        logger.warning("忽略非法整数配置 %s=%r", name, os.getenv(name))
+        logger.warning("忽略非法整数配置 %s=%r", name, _env_raw(name, str(default)))
         return default
 
 
@@ -119,6 +134,8 @@ class AgentResponse:
     escalate:    bool  = False   # 是否需要升级
     tools_used:  List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    skill_prompt: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -129,11 +146,102 @@ class Request:
     context:     str = ""        # 来自 MemoryManager 的格式化上下文
     history:     Optional[List[Dict[str, str]]] = None  # 对话历史，传给意图识别
     entities:    Dict[str, List[str]] = field(default_factory=dict)
-    intent:      Optional[IntentCategory] = None
+    intent:      Optional[LawIntent] = None
     intent_group: Optional[str] = None
     urgency:     Optional[UrgencyLevel]   = None
+    risk_flags:  List[LawRiskFlag] = field(default_factory=list)
     intent_confidence: float = 1.0
     request_id:  str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    contact_name: str = ""
+    contact_phone: str = ""
+    name: str = ""
+    phone: str = ""
+    contact: Dict[str, Any] = field(default_factory=dict)
+    legal_domain: str = ""
+    city: str = ""
+    preferred_time: str = ""
+    case_stage: str = ""
+    consent: bool = False
+
+
+def _entity_value(req: Request, key: str, default: str = "") -> str:
+    raw = getattr(req, key, None)
+    if raw not in (None, ""):
+        return str(raw)
+    values = (getattr(req, "entities", None) or {}).get(key)
+    if values:
+        first = values[0] if isinstance(values, (list, tuple)) else values
+        if first not in (None, ""):
+            return str(first)
+    if req.context:
+        try:
+            parsed = json.loads(req.context)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            value = parsed.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return default
+
+
+_TRUE_CONSENT_TOKENS = frozenset({"1", "true", "yes", "是", "同意", "愿意"})
+_PERSISTED_CONSULTATION_STATUSES = frozenset({
+    "PENDING",
+    "CONTACTED",
+    "BOOKED",
+    "CLOSED",
+})
+
+
+def _parse_consent(value: Any) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_CONSENT_TOKENS:
+            return True
+        return False
+    return bool(value)
+
+
+def _is_persisted_consultation(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("success") is False or result.get("persisted") is False:
+        return False
+    return result.get("status") in _PERSISTED_CONSULTATION_STATUSES
+
+
+def _request_contact_args(req: Request) -> Dict[str, Any]:
+    name = _entity_value(req, "contact_name", "") or _entity_value(req, "name", "")
+    phone = _entity_value(req, "contact_phone", "") or _entity_value(req, "phone", "")
+    contact = getattr(req, "contact", None)
+    if isinstance(contact, dict):
+        name = name or str(contact.get("contact_name") or contact.get("name") or "")
+        phone = phone or str(contact.get("contact_phone") or contact.get("phone") or "")
+    city = _entity_value(req, "city", "")
+    preferred_time = _entity_value(req, "preferred_time", "")
+    case_stage = _entity_value(req, "case_stage", "")
+    legal_domain = _entity_value(req, "legal_domain", "")
+    consent_raw = getattr(req, "consent", False)
+    if not consent_raw:
+        consent_raw = _entity_value(req, "consent", "")
+    if isinstance(contact, dict):
+        city = city or str(contact.get("city") or "")
+        preferred_time = preferred_time or str(contact.get("preferred_time") or "")
+        case_stage = case_stage or str(contact.get("case_stage") or "")
+        if not consent_raw:
+            consent_raw = contact.get("consent", False)
+    consent = _parse_consent(consent_raw)
+    return {
+        "name": name,
+        "phone": phone,
+        "contact": {"name": name, "phone": phone} if name and phone else {},
+        "consent": consent,
+        "city": city,
+        "preferred_time": preferred_time,
+        "case_stage": case_stage,
+        "legal_domain": legal_domain,
+    }
 
 
 @dataclass
@@ -141,7 +249,7 @@ class OrchestratorResult:
     request_id:  str
     response:    str
     agent_type:  AgentType
-    intent:      Optional[IntentCategory]
+    intent:      Optional[LawIntent]
     escalated:   bool  = False
     latency_ms:  float = 0.0
     agent_types: List[AgentType] = field(default_factory=list)
@@ -149,6 +257,7 @@ class OrchestratorResult:
     supporting_agents: List[AgentType] = field(default_factory=list)
     tools_used: List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    skill_prompt: str = ""
     routing_reason: str = ""
     routing_confidence: float = 0.0
 
@@ -193,6 +302,7 @@ class BaseAgent:
         self.stats   = AgentStats()
         self._last_tools_used: List[str] = []
         self._last_tool_traces: List[Dict[str, Any]] = []
+        self._last_skill_prompt: str = ""
         self._shared_tools: Dict[str, AgentToolSpec] = {}
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
@@ -201,6 +311,73 @@ class BaseAgent:
 
     def set_shared_tools(self, tools: Optional[Dict[str, AgentToolSpec]]) -> None:
         self._shared_tools = dict(tools or {})
+
+    @staticmethod
+    def _redact_pii(payload: Any) -> Any:
+        """Return a copy with PII masked recursively in dicts and lists."""
+        sensitive_keys = {
+            "contact_name",
+            "name",
+            "phone",
+            "contact_phone",
+            "wechat",
+            "email",
+            "id_number",
+            "identity_number",
+        }
+        if isinstance(payload, dict):
+            return {
+                key: "***" if key in sensitive_keys else BaseAgent._redact_pii(value)
+                for key, value in payload.items()
+            }
+        if isinstance(payload, list):
+            return [BaseAgent._redact_pii(item) for item in payload]
+        if isinstance(payload, tuple):
+            return tuple(BaseAgent._redact_pii(item) for item in payload)
+        return payload
+
+    async def _invoke_available_tool(
+        self,
+        name: str,
+        req: Request,
+        args: Dict[str, Any],
+        tool_use_id: str,
+    ) -> tuple[Optional[Any], Optional[Dict[str, Any]]]:
+        """Invoke a whitelisted tool without requiring an LLM round trip."""
+        spec = self.get_tools().get(name)
+        if spec is None:
+            return None, None
+        tool_t0 = time.monotonic()
+        call_success = True
+        result_success: Optional[bool] = None
+        error_text = ""
+        result: Any = None
+        try:
+            result = spec.handler(req, args)
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, dict) and "success" in result:
+                result_success = bool(result.get("success"))
+            else:
+                result_success = True
+        except Exception as ex:
+            call_success = False
+            result_success = False
+            error_text = str(ex)
+            result = {"success": False, "error": error_text}
+        trace = {
+            "agent_type": self.agent_type.value,
+            "tool_name": name,
+            "tool_use_id": tool_use_id,
+            "input": self._redact_pii(dict(args or {})),
+            "success": call_success,
+            "result_success": result_success,
+            "latency_ms": round((time.monotonic() - tool_t0) * 1000, 1),
+            "cached": bool(result.get("cached")) if isinstance(result, dict) else False,
+            "reranked": bool(result.get("reranked")) if isinstance(result, dict) else False,
+            "error": error_text,
+        }
+        return result, trace
 
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
@@ -276,6 +453,7 @@ class BaseAgent:
             tool_uses = [block for block in (resp.content or []) if self._block_type(block) == "tool_use"]
             if not tool_uses:
                 self._last_tools_used = tools_used
+                self._last_tool_traces = tool_traces
                 return extract_text_content(resp.content)
 
             messages.append({"role": "assistant", "content": resp.content})
@@ -299,9 +477,10 @@ class BaseAgent:
                         result = spec.handler(req, args)
                         if inspect.isawaitable(result):
                             result = await result
-                        tools_used.append(name)
                         if isinstance(result, dict) and "success" in result:
                             result_success = bool(result.get("success"))
+                        if call_success and result_success is not False:
+                            tools_used.append(name)
                     except Exception as ex:
                         call_success = False
                         logger.warning("Agent 工具 %s 执行失败: %s", name, ex)
@@ -315,7 +494,7 @@ class BaseAgent:
                         "agent_type": self.agent_type.value,
                         "tool_name": name,
                         "tool_use_id": tool_use_id,
-                        "input": dict(args),
+                        "input": self._redact_pii(dict(args)),
                         "success": call_success,
                         "result_success": result_success,
                         "latency_ms": round(tool_latency_ms, 1),
@@ -359,7 +538,7 @@ class BaseAgent:
         unknown = set(args) - set(properties)
         if unknown and schema.get("additionalProperties") is False:
             raise ValueError(f"不允许的工具参数: {', '.join(sorted(unknown))}")
-        type_map = {"string": str, "number": (int, float), "integer": int, "boolean": bool}
+        type_map = {"string": str, "number": (int, float), "integer": int, "boolean": bool, "array": list, "object": dict}
         for key, value in args.items():
             expected = properties.get(key, {}).get("type")
             if expected in type_map and not isinstance(value, type_map[expected]):
@@ -376,7 +555,7 @@ class BaseAgent:
             f"输出要求：{'；'.join(self.profile.output_contract)}\n"
             f"升级条件：{'；'.join(self.profile.handoff_conditions) or '无，按通用客服规则处理'}\n"
             f"允许的数据/工具范围：{'、'.join(self.profile.tool_scope) or '仅使用当前请求上下文'}\n"
-            "不要声称执行了未提供的查询、修改或退款操作；缺少证据时明确说明需要核验。"
+            "不要声称已形成正式法律意见，或完成未提供的查询、留资、律师推荐等操作；缺少证据时明确说明需要补充或人工确认。"
         )
         base_prompt = f"{self.system_prompt}{profile_prompt}"
         if self._skill_manager is None:
@@ -394,6 +573,7 @@ class BaseAgent:
             "intent_group": req.intent_group,
             "urgency": req.urgency.name if req.urgency else None,
             "intent_confidence": round(req.intent_confidence, 4),
+            "risk_flags": [flag.value for flag in req.risk_flags],
             "available_entities": req.entities or {},
         }
         return json.dumps(packet, ensure_ascii=False)
@@ -404,147 +584,295 @@ class BaseAgent:
         return any(kw in content for kw in keywords)
 
 
-class GeneralAgent(BaseAgent):
-    agent_type    = AgentType.GENERAL
+class ReceptionAgent(BaseAgent):
+    """律所首层接待：识别领域、检查缺失信息并处理律所服务问题。"""
+
+    agent_type = AgentType.RECEPTION
     profile = AgentProfile(
-        role="通用客服分诊与首轮接待",
-        mission="快速回答基础问题，澄清不完整需求，并识别是否需要专业 Agent 或人工处理。",
-        workflow=("复述诉求", "判断业务范围", "直接回答或补充必要信息", "给出下一步"),
-        input_contract=("对话历史", "用户画像", "意图与紧急度", "知识库上下文"),
-        output_contract=("先回应核心问题", "信息不足时只询问必要字段", "明确下一步和边界"),
-        handoff_conditions=("涉及权限、资金、隐私或复杂投诉", "用户明确要求人工"),
-        tool_scope=("search_knowledge_base", "inspect_request_context", "suggest_required_fields"),
-        temperature=0.3,
+        role="律所接待与领域判断",
+        mission="识别法律领域、确认缺失信息、处理律所服务/收费咨询；不确定时引导补充关键事实。",
+        workflow=("复述诉求", "识别法律领域", "检查缺失字段", "给出下一步"),
+        input_contract=("用户消息", "对话历史", "意图与紧急度", "风险信号", "结构化实体"),
+        output_contract=("先回应核心问题", "说明已识别领域", "列出缺失关键信息", "给出下一步或升级边界"),
+        handoff_conditions=("用户明确要求预约律师或转人工", "刑事拘留等高风险信号", "多次无法判断法律领域"),
+        tool_scope=(
+            "search_law_knowledge",
+            "identify_legal_domain",
+            "check_missing_facts",
+            "build_reception_summary",
+        ),
+        temperature=0.2,
         max_tokens=900,
     )
     system_prompt = (
-        "你是 LawMind 智能客服。友好、简洁地回答用户问题。"
-        "如果问题超出你的能力范围，明确说明并建议转接专业客服。"
+        "你是律所接待与分诊助手。优先确认客户身份、地区、案件时间和事实；"
+        "不承诺诉讼结果，不提供正式法律意见。业务不明确时只问必要问题。"
     )
 
-    def _build_role_packet(self, req: Request) -> str:
-        packet = json.loads(super()._build_role_packet(req))
-        packet["triage_targets"] = ["technical", "billing", "escalation"]
-        packet["response_mode"] = "answer_or_clarify"
-        return json.dumps(packet, ensure_ascii=False)
-
     def get_tools(self) -> Dict[str, AgentToolSpec]:
-        tools = super().get_tools()
-        tools.update(general_tools())
+        tools = dict(super().get_tools())
+        if "search_law_knowledge" not in tools:
+            tools.update(build_shared_law_rag_tools(None))
+        tools.update(reception_tools())
         return tools
 
 
-class TechnicalAgent(BaseAgent):
-    agent_type    = AgentType.TECHNICAL
+class CriminalDefenseAgent(BaseAgent):
+    """刑事辩护/醉驾咨询：整理事实、阶段、证据与风险。"""
+
+    agent_type = AgentType.CRIMINAL
     profile = AgentProfile(
-        role="技术故障诊断与排障",
-        mission="基于错误码、环境和复现信息缩小根因范围，给出低风险、可验证的排查步骤。",
-        workflow=("确认现象", "判断影响范围", "按网络/权限/配置/依赖排查", "给出验证方式", "判断升级条件"),
-        input_contract=("错误码", "问题发生时间", "运行环境", "影响范围", "最近变更", "知识库上下文"),
-        output_contract=("现象复述", "可能原因", "编号排查步骤", "验证结果", "需要补充的信息"),
-        handoff_conditions=("生产大面积不可用", "数据丢失或权限异常", "需要后台日志、数据库或人工操作"),
-        tool_scope=("search_knowledge_base", "lookup_error_code", "build_diagnostic_plan"),
+        role="刑事辩护与醉驾风险评估",
+        mission="分析刑事/醉驾咨询的事实、案件阶段和风险信号，给出初步信息、需补充材料和下一步建议。",
+        workflow=(
+            "确认咨询对象与事实",
+            "识别案件阶段",
+            "评估拘留/程序/时效风险",
+            "给出材料与下一步",
+            "判断是否转人工",
+        ),
+        input_contract=(
+            "用户消息",
+            "对话历史",
+            "当事人身份",
+            "案件阶段",
+            "发生时间",
+            "城市",
+            "血液酒精数值",
+            "拘留状态",
+            "委托律师状态",
+            "风险信号",
+        ),
+        output_contract=(
+            "复述关键事实",
+            "说明当前可判断的案件阶段与主要法律风险",
+            "列出需补充信息",
+            "给出下一步与升级条件",
+            "不承诺结果、不提供正式法律意见",
+        ),
+        handoff_conditions=("刑事拘留或羁押", "即将开庭", "无律师且高风险", "用户明确要求人工"),
+        tool_scope=(
+            "search_law_knowledge",
+            "extract_criminal_facts",
+            "check_criminal_stage",
+            "assess_criminal_risk",
+        ),
         temperature=0.1,
-        max_tokens=1200,
-    )
-    system_prompt = (
-        "你是技术支持专家。专注于：故障排查、错误诊断、系统配置。"
-        "提供清晰的步骤化解决方案。遇到需要后台操作的问题，说明需要升级处理。"
-    )
-
-    def _build_role_packet(self, req: Request) -> str:
-        packet = json.loads(super()._build_role_packet(req))
-        packet["diagnostic_fields"] = {
-            "error_codes": req.entities.get("error_code", []),
-            "environment_hint": "请从用户消息和背景中确认设备、系统、版本、网络",
-            "risk_boundary": "不得要求密码、验证码、完整密钥；不得建议破坏性操作",
-        }
-        return json.dumps(packet, ensure_ascii=False)
-
-    def get_tools(self) -> Dict[str, AgentToolSpec]:
-        tools = super().get_tools()
-        tools.update(technical_tools())
-        return tools
-
-
-class BillingAgent(BaseAgent):
-    agent_type    = AgentType.BILLING
-    profile = AgentProfile(
-        role="账单核验与售后处理",
-        mission="区分扣款、退款、发票、订阅等资金场景，解释可判断事实，并明确核验和人工审核边界。",
-        workflow=("确认账单场景", "收集必要核验字段", "区分订单/实付/退款金额", "说明处理路径与时效", "判断是否升级"),
-        input_contract=("订单号", "金额与币种", "支付时间", "支付渠道", "用户期望", "知识库上下文"),
-        output_contract=("需要核验的信息", "当前可判断内容", "下一步处理路径", "时效边界"),
-        handoff_conditions=("实际退款或补偿", "重复扣款或支付成功但订单未生效", "发票作废/重开", "企业合同或大额订单"),
-        tool_scope=("search_knowledge_base", "check_billing_fields", "compare_amounts"),
-        temperature=0.0,
         max_tokens=1100,
     )
     system_prompt = (
-        "你是账单服务专家。专注于：账单查询、退款申请、发票问题、订阅管理。"
-        "对财务问题保持准确和专业。涉及实际退款操作时，说明需要人工审核。"
+        "你是刑事法律咨询助手。严格按事实和法定期限陈述；"
+        "涉及拘留、开庭、取保候审、量刑时不得承诺结果。"
     )
 
-    def _build_role_packet(self, req: Request) -> str:
-        packet = json.loads(super()._build_role_packet(req))
-        packet["verification_fields"] = {
-            "order_id": req.entities.get("order_id", []),
-            "amount": req.entities.get("amount", []),
-            "date": req.entities.get("date", []),
-            "missing_fields": [
-                field for field, values in (
-                    ("订单号或交易号", req.entities.get("order_id", [])),
-                    ("支付金额", req.entities.get("amount", [])),
-                ) if not values
-            ],
-            "risk_boundary": "不得承诺退款成功、立即到账或直接修改账单",
-        }
-        return json.dumps(packet, ensure_ascii=False)
+    def get_tools(self) -> Dict[str, AgentToolSpec]:
+        tools = dict(super().get_tools())
+        if "search_law_knowledge" not in tools:
+            tools.update(build_shared_law_rag_tools(None))
+        tools.update(criminal_tools())
+        return tools
+
+
+class CivilConsultationAgent(BaseAgent):
+    """民事法律咨询：覆盖劳动、婚姻、合同、交通、借贷等常见民事领域。"""
+
+    agent_type = AgentType.CIVIL
+    profile = AgentProfile(
+        role="民事法律咨询",
+        mission="识别劳动争议、婚姻家事、合同纠纷、交通事故、民间借贷等民事领域的事实与程序，给出咨询路径。",
+        workflow=(
+            "复述诉求",
+            "识别民事领域",
+            "梳理事实与证据",
+            "判断诉讼/仲裁程序",
+            "给出下一步并判断升级",
+        ),
+        input_contract=(
+            "用户消息",
+            "对话历史",
+            "民事领域",
+            "发生时间",
+            "城市",
+            "争议金额",
+            "合同/证据情况",
+            "风险信号",
+        ),
+        output_contract=(
+            "复述诉求与关键事实",
+            "说明对应民事领域和大致程序",
+            "列出需补充材料",
+            "给出下一步与升级条件",
+            "不承诺结果、不提供正式法律意见",
+        ),
+        handoff_conditions=("用户明确要求人工或预约律师", "人身/大额/紧急民事风险", "材料复杂需人工核验"),
+        tool_scope=(
+            "search_law_knowledge",
+            "extract_civil_facts",
+            "determine_procedure",
+            "assess_civil_risk",
+        ),
+        temperature=0.2,
+        max_tokens=1100,
+    )
+    system_prompt = (
+        "你是民事法律咨询助手。区分劳动仲裁、婚姻家事、合同、交通事故、民间借贷等程序；"
+        "不承诺胜诉、执行或赔偿结果。"
+    )
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
-        tools = super().get_tools()
-        tools.update(billing_tools())
+        tools = dict(super().get_tools())
+        if "search_law_knowledge" not in tools:
+            tools.update(build_shared_law_rag_tools(None))
+        tools.update(civil_tools())
         return tools
 
 
 class EscalationAgent(BaseAgent):
-    """人工升级节点。
+    """人工升级与留资交接节点。
 
-    升级不是一个普通问答 Prompt：它应该生成标准化的交接信息并停止普通
-    Agent 继续编造答案。生产环境可在这里接工单系统、人工队列或 Webhook。
+    该节点不调用 LLM：它生成确定性的转人工回复并标记 escalate=True。
+    get_tools() 已接入推荐律师、校验联系方式、咨询记录草稿和交接摘要工具。
     """
 
     agent_type = AgentType.ESCALATION
     profile = AgentProfile(
-        role="人工升级与交接",
-        mission="确认升级原因，整理已知上下文，告知用户下一步，不执行未经授权的业务操作。",
-        workflow=("确认升级原因", "整理已知信息", "标记优先级", "生成交接摘要"),
-        input_contract=("用户消息", "意图", "紧急度", "结构化实体", "对话背景"),
-        output_contract=("升级原因", "已知信息摘要", "还需补充的信息", "保守的后续说明"),
-        handoff_conditions=("用户明确要求人工", "紧急或高风险场景"),
-        tool_scope=("search_knowledge_base", "create_handoff_summary"),
+        role="人工升级与留资交接",
+        mission="确认升级原因，整理法律风险与已知信息，引导留资或预约律师，并生成确定性交接回复。",
+        workflow=("确认升级原因", "整理法律风险与已知信息", "引导留资/预约律师", "生成交接摘要"),
+        input_contract=("用户消息", "意图", "紧急度", "风险信号", "结构化实体", "对话背景"),
+        output_contract=("转人工原因", "已知信息与风险摘要", "留资/预约下一步", "保守的后续说明"),
+        handoff_conditions=("刑事拘留", "用户明确要求人工", "紧急或高风险场景", "需要预约律师或留资"),
+        tool_scope=(
+            "search_law_knowledge",
+            "recommend_lawyer",
+            "validate_contact",
+            "create_consultation_record",
+            "build_handoff_summary",
+        ),
         temperature=0.0,
         max_tokens=500,
     )
-    system_prompt = "你负责客服人工升级交接，不要继续模拟已完成的后台操作。"
+    system_prompt = (
+        "你负责律所人工升级与留资交接，不要续写提供正式法律意见；"
+        "只确认原因、整理摘要并引导用户联系人工客服或预约律师。"
+    )
+
+    def __init__(
+        self,
+        client: AsyncAnthropic,
+        model: str,
+        skill_manager: Optional[Any] = None,
+        profile: Optional[AgentProfile] = None,
+        lawyer_service: Optional[Any] = None,
+        consultation_service: Optional[Any] = None,
+    ):
+        super().__init__(client, model, skill_manager, profile)
+        self._lawyer_service = lawyer_service
+        self._consultation_service = consultation_service
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
-        tools = super().get_tools()
-        tools.update(escalation_tools())
+        tools = dict(super().get_tools())
+        if "search_law_knowledge" not in tools:
+            tools.update(build_shared_law_rag_tools(None))
+        tools.update(build_escalation_tools(
+            self._consultation_service,
+            self._lawyer_service,
+        ))
         return tools
 
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
         self.stats.total += 1
+        skill_prompt = ""
+        if self._skill_manager is not None:
+            try:
+                skill_prompt = self._skill_manager.prompt_for(req.message, self.agent_type.value)
+            except Exception:
+                skill_prompt = ""
+                logger.warning("Escalation Skill prompt 注入失败，继续确定性人工交接")
+        self._last_skill_prompt = skill_prompt
         intent = req.intent.value if req.intent else "unknown"
         urgency = req.urgency.name if req.urgency else "UNKNOWN"
+        risk_values = [flag.value for flag in req.risk_flags]
         entities = json.dumps(req.entities or {}, ensure_ascii=False)
+        consultation_recorded = False
         content = (
-            "我已将这个问题标记为人工升级处理。\n\n"
+            "已收到您的法律咨询。为保障您的权益，现将该问题标记为转人工处理。\n\n"
             f"升级原因：意图={intent}，紧急度={urgency}\n"
-            f"已记录信息：{entities}\n"
-            "请不要发送密码、短信验证码或完整支付凭证；人工客服会根据会话记录继续核验。"
+            f"风险信号：{', '.join(risk_values) if risk_values else '暂无'}\n"
         )
+        tools = self.get_tools()
+        tools_used: List[str] = []
+        tool_traces: List[Dict[str, Any]] = []
+        recommended_lawyers: List[Dict[str, Any]] = []
+        contact_args = _request_contact_args(req)
+        legal_domain = resolve_legal_domain(req, contact_args)
+
+        if "recommend_lawyer" in tools:
+            recommend_args = {"legal_domain": legal_domain}
+            recommend_result, trace = await self._invoke_available_tool(
+                "recommend_lawyer",
+                req,
+                recommend_args,
+                "escalation-recommend",
+            )
+            if trace is not None:
+                tool_traces.append(trace)
+                recommend_success = (
+                    trace.get("success") is not False
+                    and trace.get("result_success") is not False
+                )
+                if recommend_success:
+                    tools_used.append("recommend_lawyer")
+                    if isinstance(recommend_result, list):
+                        recommended_lawyers = recommend_result
+                    elif isinstance(recommend_result, dict):
+                        recommended_lawyers = list(recommend_result.get("lawyers") or [])
+
+        if "build_handoff_summary" in tools:
+            _, trace = await self._invoke_available_tool(
+                "build_handoff_summary",
+                req,
+                contact_args,
+                "escalation-handoff-summary",
+            )
+            if trace is not None:
+                tool_traces.append(trace)
+                if trace.get("success") is not False and trace.get("result_success") is not False:
+                    tools_used.append("build_handoff_summary")
+
+        contact_valid = bool(contact_args.get("name") and contact_args.get("phone"))
+        if contact_valid:
+            contact_valid = validate_contact(req, contact_args)["valid"]
+
+        if contact_valid and contact_args.get("consent") and "create_consultation_record" in tools:
+            create_args = dict(contact_args)
+            create_args["recommended_lawyers"] = recommended_lawyers
+            create_args["legal_domain"] = legal_domain
+            create_result, trace = await self._invoke_available_tool(
+                "create_consultation_record",
+                req,
+                create_args,
+                "escalation-create-record",
+            )
+            if trace is not None:
+                tool_traces.append(trace)
+                if (
+                    trace.get("success") is not False
+                    and trace.get("result_success") is not False
+                    and _is_persisted_consultation(create_result)
+                ):
+                    tools_used.append("create_consultation_record")
+                    consultation_recorded = True
+
+        if consultation_recorded:
+            content += f"已记录信息：{entities}\n"
+        else:
+            content += "咨询记录暂未保存，请保持会话以便人工客服跟进。\n"
+        content += "人工客服或律师会根据会话记录继续核验。请不要发送身份证号、银行卡号或短信验证码等敏感信息。\n"
+
+        self._last_tools_used = tools_used
+        self._last_tool_traces = tool_traces
         ms = (time.monotonic() - t0) * 1000
         self.stats.success += 1
         self.stats.total_ms += ms
@@ -554,7 +882,14 @@ class EscalationAgent(BaseAgent):
             success=True,
             latency_ms=ms,
             escalate=True,
-            tools_used=[],
+            tools_used=tools_used,
+            tool_traces=tool_traces,
+            skill_prompt=self._last_skill_prompt,
+            metadata={
+                "skill_prompt_injected": bool(skill_prompt),
+                "skill_prompt_used": bool(skill_prompt),
+                "skill_prompt_chars": len(skill_prompt),
+            },
         )
 
 
@@ -578,23 +913,23 @@ class ResponseComposer:
             for response in successful
         )
         prompt = (
-            "你是客服 Response Composer，负责把多个专业 Agent 的结果合并成一条最终回复。\n"
-            "要求：以主 Agent 的结论为主，按用户问题优先级组织内容；去掉重复和冲突表述；"
-            "不能补造订单、退款、后台查询结果；如果结论冲突，明确说明需要核验；"
-            "保留必要的排查步骤、核验字段和升级边界。只输出给用户看的中文回复，不要提及 Agent。\n\n"
+            "你是律所多 Agent Response Composer，负责把多个专业 Agent 的结果合并成一条最终回复。\n"
+            "要求：以主 Agent 的结论为主，按法律咨询风险优先级组织内容；去掉重复和冲突表述；"
+            "不能补造检索结果、律师推荐、合同审核或正式法律意见；如果结论冲突，明确说明需要人工核验；"
+            "保留必要的补充材料和升级边界。只输出给用户看的中文回复，不要提及 Agent。\n\n"
             f"主 Agent：{successful[0].agent_type.value}\n"
             f"用户问题：{req.message}\n"
             f"候选结果：\n{evidence}"
         )
         if self._skill_manager is not None:
-            skill = self._skill_manager.prompt_for(req.message, "general")
+            skill = self._skill_manager.prompt_for(req.message, "reception")
             if skill:
                 prompt += f"\n\n[通用客服输出边界]\n{skill}"
         try:
             response = await self._client.messages.create(
                 model=self._model,
-                max_tokens=_env_int("legacy_COMPOSER_MAX_TOKENS", 1000),
-                temperature=_env_float("legacy_COMPOSER_TEMPERATURE", 0.1),
+                max_tokens=_env_int("LAWMIND_COMPOSER_MAX_TOKENS", 1000),
+                temperature=_env_float("LAWMIND_COMPOSER_TEMPERATURE", 0.1),
                 messages=[{"role": "user", "content": prompt}],
             )
             content = extract_text_content(response.content).strip()
@@ -613,30 +948,13 @@ class ResponseComposer:
 # ── 编排器 ────────────────────────────────────────────────────────────────────
 
 class AgentOrchestrator:
-    """
-    多 Agent 编排器。
+    """LawMind 律所多 Agent 编排器。
 
-    路由逻辑（三层）：
-      1. 意图 → Agent 类型映射
+    路由逻辑：
+      1. LawIntent 与 LawRiskFlag 决策，刑事/民事/接待/升级按领域映射
       2. 同类多实例时按 routing_score() 选最优
-      3. 专属 Agent 失败时降级到 GeneralAgent
+      3. 刑事/民事专属 Agent 失败时降级到 ReceptionAgent
     """
-
-    # 意图 → Agent 类型的静态映射（路由表）
-    _INTENT_ROUTING: Dict[IntentCategory, AgentType] = {
-        IntentCategory.TECHNICAL:  AgentType.TECHNICAL,
-        IntentCategory.TECHNICAL_LOGIN: AgentType.TECHNICAL,
-        IntentCategory.TECHNICAL_CRASH: AgentType.TECHNICAL,
-        IntentCategory.BILLING:    AgentType.BILLING,
-        IntentCategory.REFUND:     AgentType.BILLING,
-        IntentCategory.INVOICE:    AgentType.BILLING,
-        IntentCategory.PAYMENT_ISSUE: AgentType.BILLING,
-        IntentCategory.ACCOUNT:    AgentType.BILLING,
-        IntentCategory.ACCOUNT_SECURITY: AgentType.BILLING,
-        IntentCategory.ESCALATION: AgentType.ESCALATION,
-        IntentCategory.HUMAN_HANDOFF: AgentType.ESCALATION,
-        # 其余意图 → GENERAL（默认）
-    }
 
     def __init__(
         self,
@@ -645,26 +963,37 @@ class AgentOrchestrator:
         model:    str = "claude-3-5-sonnet-20241022",
         skill_manager: Optional[Any] = None,
         rag_tool_manager: Optional[Any] = None,
+        client: Optional[Any] = None,
+        lawyer_service: Optional[Any] = None,
+        consultation_service: Optional[Any] = None,
     ):
-        kwargs: Dict[str, Any] = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        client = AsyncAnthropic(**kwargs)
+        if client is None:
+            kwargs: Dict[str, Any] = {"api_key": api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            client = AsyncAnthropic(**kwargs)
 
-        self._intent_recognizer = IntentRecognizer(api_key=api_key, base_url=base_url, model=model)
+        self._intent_recognizer = LawIntentRecognizer(api_key=api_key, model=model)
         self._skill_manager = skill_manager
         self._composer = ResponseComposer(client, model, skill_manager)
         self._shared_tools: Dict[str, AgentToolSpec] = {}
-        self._recent_tool_traces = deque(maxlen=_env_int("legacy_TOOL_TRACE_MAX", 200))
+        self._recent_tool_traces = deque(maxlen=_env_int("LAWMIND_TOOL_TRACE_MAX", 200))
 
-        # Agent 池：每种类型可有多个实例（水平扩展）
+        # Agent 池：每种律所角色可有多个实例（水平扩展）
         self._pool: Dict[AgentType, List[BaseAgent]] = {
-            AgentType.GENERAL: [self._make_agent(GeneralAgent, client, model, skill_manager)],
-            AgentType.TECHNICAL: [self._make_agent(TechnicalAgent, client, model, skill_manager)],
-            AgentType.BILLING: [self._make_agent(BillingAgent, client, model, skill_manager)],
-            AgentType.ESCALATION: [self._make_agent(EscalationAgent, client, model, skill_manager)],
+            AgentType.RECEPTION: [self._make_agent(ReceptionAgent, client, model, skill_manager)],
+            AgentType.CRIMINAL: [self._make_agent(CriminalDefenseAgent, client, model, skill_manager)],
+            AgentType.CIVIL: [self._make_agent(CivilConsultationAgent, client, model, skill_manager)],
+            AgentType.ESCALATION: [self._make_agent(
+                EscalationAgent,
+                client,
+                model,
+                skill_manager,
+                lawyer_service=lawyer_service,
+                consultation_service=consultation_service,
+            )],
         }
-        self.set_shared_tools(build_shared_rag_tools(rag_tool_manager))
+        self.set_shared_tools(build_shared_law_rag_tools(rag_tool_manager))
 
     @staticmethod
     def _make_agent(
@@ -672,16 +1001,27 @@ class AgentOrchestrator:
         client: AsyncAnthropic,
         default_model: str,
         skill_manager: Optional[Any],
+        lawyer_service: Optional[Any] = None,
+        consultation_service: Optional[Any] = None,
     ) -> BaseAgent:
         """按角色创建 Agent，并允许用环境变量覆盖该角色的模型。
 
         可使用更强模型，通用接待可使用更快模型，升级节点本身不需要调用 LLM。
         """
         profile = agent_cls.profile
-        env_name = f"legacy_{agent_cls.agent_type.value.upper()}_MODEL"
-        model = os.getenv(env_name, "").strip() or profile.model
+        agent_env_name = f"{agent_cls.agent_type.value.upper()}_MODEL"
+        env_name = "LAWMIND_" + agent_env_name
+        model = (
+            os.getenv(env_name, "").strip()
+            or os.getenv(_LEGACY_ENV_PREFIX + agent_env_name, "").strip()
+            or profile.model
+        )
         configured_profile = replace(profile, model=model) if model else profile
-        return agent_cls(client, default_model, skill_manager, profile=configured_profile)
+        kwargs: Dict[str, Any] = {"profile": configured_profile}
+        if agent_cls is EscalationAgent:
+            kwargs["lawyer_service"] = lawyer_service
+            kwargs["consultation_service"] = consultation_service
+        return agent_cls(client, default_model, skill_manager, **kwargs)
 
     def set_skill_manager(self, skill_manager: Optional[Any]) -> None:
         """更新 SkillManager 引用，供运行时重载或测试替换使用。"""
@@ -747,25 +1087,27 @@ class AgentOrchestrator:
             req.intent  = intent_result.intent
             req.intent_group = intent_result.intent_group
             req.urgency = intent_result.urgency
+            req.entities = dict(intent_result.entities or {})
+            req.risk_flags = list(intent_result.risk_flags or [])
             req.intent_confidence = intent_result.confidence
 
         if self._needs_clarification(req):
             result = OrchestratorResult(
                 request_id=req.request_id,
-                response="我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？",
-                agent_type=AgentType.GENERAL,
+                response="我还不能确定您希望咨询哪个法律领域。请补充是刑事辩护、劳动争议、婚姻家事、合同纠纷、交通事故、民间借贷，还是需要预约律师？",
+                agent_type=AgentType.RECEPTION,
                 intent=req.intent,
                 escalated=False,
                 latency_ms=(time.monotonic() - t0) * 1000,
-                agent_types=[AgentType.GENERAL],
-                primary_agent=AgentType.GENERAL,
-                routing_reason="低置信度 OTHER 意图，先澄清用户需求",
+                agent_types=[AgentType.RECEPTION],
+                primary_agent=AgentType.RECEPTION,
+                routing_reason="低置信度 OTHER 法律意图，先澄清用户领域",
                 routing_confidence=req.intent_confidence,
             )
             self._record_tool_trace(result)
             return result
 
-        # 复杂问题自动并行协作，例如同一句同时涉及登录故障和扣款/退款。
+        # 复杂问题自动并行协作，例如同一句同时涉及刑事和民事领域。
         decision = self._route_decision(req)
         if decision.multi_agent:
             return await self.run_parallel(req, decision)
@@ -775,12 +1117,15 @@ class AgentOrchestrator:
 
         # 4. 升级检查
         escalated = False
-        if response.escalate or req.urgency == UrgencyLevel.CRITICAL or req.intent in (
-            IntentCategory.ESCALATION,
-            IntentCategory.HUMAN_HANDOFF,
+        if (
+            response.escalate
+            or req.urgency == UrgencyLevel.CRITICAL
+            or LawRiskFlag.DETENTION in req.risk_flags
+            or LawRiskFlag.COURT_SOON in req.risk_flags
+            or req.intent == LawIntent.LAWYER_APPOINTMENT
         ):
             escalated = True
-            logger.warning(f"请求 {req.request_id} 触发升级: urgency={req.urgency}")
+            logger.warning(f"请求 {req.request_id} 触发升级: urgency={req.urgency}, risk_flags={[f.value for f in req.risk_flags]}")
             # 生产环境：此处创建工单、通知人工客服
 
         result = OrchestratorResult(
@@ -795,6 +1140,7 @@ class AgentOrchestrator:
             supporting_agents=[],
             tools_used=list(response.tools_used),
             tool_traces=list(response.tool_traces),
+            skill_prompt=response.skill_prompt,
             routing_reason=decision.reason,
             routing_confidence=decision.confidence,
         )
@@ -804,7 +1150,7 @@ class AgentOrchestrator:
     async def run_parallel(self, req: Request, decision: RoutingDecision) -> OrchestratorResult:
         """
         并行派发给多个 Agent，合并结果。
-        适用于复杂问题（如同时涉及技术和账单）。
+        适用于同时涉及刑事与民事等复合法律领域。
         """
         t0 = time.monotonic()
         agent_types = decision.agent_types
@@ -824,6 +1170,14 @@ class AgentOrchestrator:
             for response in valid_responses
             for trace in response.tool_traces
         ]
+        escalation_skill_prompt = next(
+            (
+                response.skill_prompt
+                for response in valid_responses
+                if response.agent_type == AgentType.ESCALATION and response.skill_prompt
+            ),
+            "",
+        )
         result = OrchestratorResult(
             request_id=req.request_id,
             response=combined,
@@ -839,6 +1193,7 @@ class AgentOrchestrator:
             supporting_agents=decision.supporting_agents,
             tools_used=tools_used,
             tool_traces=tool_traces,
+            skill_prompt=escalation_skill_prompt,
             routing_reason=decision.reason,
             routing_confidence=decision.confidence,
         )
@@ -847,42 +1202,28 @@ class AgentOrchestrator:
 
     # ── 路由逻辑 ──────────────────────────────────────────────────────────────
 
-    def _route(self, intent: Optional[IntentCategory], urgency: Optional[UrgencyLevel]) -> AgentType:
-        """
-        三层路由决策：
-          1. 意图映射
-          2. 紧急度覆盖（CRITICAL 直接升级）
-          3. 默认 GENERAL
-        """
-        if urgency == UrgencyLevel.CRITICAL:
-            return AgentType.ESCALATION
-
-        if intent and intent in self._INTENT_ROUTING:
-            target = self._INTENT_ROUTING[intent]
-            # 如果目标类型有可用实例则使用，否则降级
-            if target in self._pool and self._pool[target]:
-                return target
-
-        return AgentType.GENERAL
-
     def _route_decision(self, req: Request) -> RoutingDecision:
         """
-        结构化路由决策。
+        律所结构化路由决策。
 
-        先处理紧急/转人工，再用领域分数决定主 Agent 和辅助 Agent。
-        这样可以表达“主处理 + 辅助诊断”，避免关键词命中后无主次地拼接。
+        刑事拘留、即将开庭/CRITICAL 紧急度优先升级；律师预约也直接升级；
+        随后按领域分数选择主 Agent 和可能的跨领域辅助 Agent。
         """
-        if req.urgency == UrgencyLevel.CRITICAL:
+        if (
+            req.urgency == UrgencyLevel.CRITICAL
+            or LawRiskFlag.DETENTION in req.risk_flags
+            or LawRiskFlag.COURT_SOON in req.risk_flags
+        ):
             return RoutingDecision(
                 primary_agent=AgentType.ESCALATION,
-                reason="紧急度为 CRITICAL，触发升级路由",
+                reason="刑事拘留、即将开庭或紧急度为 CRITICAL，触发人工升级路由",
                 confidence=1.0,
             )
 
-        if req.intent in (IntentCategory.ESCALATION, IntentCategory.HUMAN_HANDOFF):
+        if req.intent == LawIntent.LAWYER_APPOINTMENT:
             return RoutingDecision(
                 primary_agent=AgentType.ESCALATION,
-                reason=f"意图为 {req.intent.value if req.intent else 'unknown'}，触发升级路由",
+                reason=f"意图为 {req.intent.value}，触发预约律师/人工升级路由",
                 confidence=max(req.intent_confidence, 0.8),
             )
 
@@ -890,12 +1231,12 @@ class AgentOrchestrator:
         available_scores = {
             agent_type: score
             for agent_type, score in scores.items()
-            if agent_type == AgentType.GENERAL or self._pool.get(agent_type)
+            if self._pool.get(agent_type)
         }
         if not available_scores:
             return RoutingDecision(
-                primary_agent=AgentType.GENERAL,
-                reason="无可用专属 Agent，降级到 GeneralAgent",
+                primary_agent=AgentType.RECEPTION,
+                reason="无可用律所 Agent，降级到 ReceptionAgent",
                 confidence=0.1,
             )
 
@@ -904,7 +1245,9 @@ class AgentOrchestrator:
         supporting_agents = [
             agent_type
             for agent_type, score in ordered[1:]
-            if agent_type != AgentType.GENERAL and score >= 0.45 and score >= primary_score * 0.55
+            if agent_type not in (AgentType.ESCALATION, AgentType.RECEPTION)
+            and score >= 0.45
+            and score >= primary_score * 0.55
         ]
 
         reason = self._routing_reason(req, available_scores, primary_agent, supporting_agents)
@@ -916,62 +1259,64 @@ class AgentOrchestrator:
         )
 
     def _domain_scores(self, req: Request) -> Dict[AgentType, float]:
-        """按意图、关键词和实体为各领域 Agent 打分。"""
+        """按法律意图、领域关键词、实体和风险信号为律所 Agent 打分。"""
         msg = req.message.lower()
         scores = {
-            AgentType.GENERAL: 0.1,
-            AgentType.TECHNICAL: 0.0,
-            AgentType.BILLING: 0.0,
+            AgentType.RECEPTION: 0.15,
+            AgentType.CRIMINAL: 0.0,
+            AgentType.CIVIL: 0.0,
         }
 
-        if req.intent in (
-            IntentCategory.QUERY,
-            IntentCategory.ORDER_STATUS,
-            IntentCategory.LOGISTICS,
-            IntentCategory.REQUEST,
-            IntentCategory.COMPLAINT,
-            IntentCategory.GREETING,
-            IntentCategory.FEEDBACK,
-            IntentCategory.OTHER,
-        ):
-            scores[AgentType.GENERAL] += 0.55
+        criminal_intents = {
+            LawIntent.DANGEROUS_DRIVING,
+            LawIntent.CRIMINAL_DEFENSE,
+        }
+        civil_intents = {
+            LawIntent.LABOR_DISPUTE,
+            LawIntent.MARRIAGE_FAMILY,
+            LawIntent.CONTRACT_DISPUTE,
+            LawIntent.TRAFFIC_ACCIDENT,
+            LawIntent.CIVIL_LOAN,
+        }
+        if req.intent in criminal_intents:
+            scores[AgentType.CRIMINAL] += 0.8
+        if req.intent in civil_intents:
+            scores[AgentType.CIVIL] += 0.8
+        if req.intent in (LawIntent.LAW_FIRM_SERVICE, LawIntent.OTHER):
+            scores[AgentType.RECEPTION] += 0.8
 
-        if req.intent in (
-            IntentCategory.TECHNICAL,
-            IntentCategory.TECHNICAL_LOGIN,
-            IntentCategory.TECHNICAL_CRASH,
-        ):
-            scores[AgentType.TECHNICAL] += 0.75
+        criminal_kws = [
+            "醉驾", "酒驾", "危险驾驶", "刑事拘留", "被拘留", "羁押",
+            "刑事辩护", "取保候审", "审查起诉", "开庭", "看守所",
+        ]
+        civil_kws = [
+            "劳动仲裁", "拖欠工资", "离婚", "抚养权", "合同纠纷", "违约",
+            "交通事故", "车祸", "民间借贷", "欠钱", "借条", "债务",
+        ]
+        reception_kws = [
+            "怎么收费", "收费标准", "律所地址", "咨询流程", "服务流程",
+            "代理费", "工作时间", "预约律师", "律师推荐", "转人工",
+        ]
 
-        if req.intent in (
-            IntentCategory.BILLING,
-            IntentCategory.ACCOUNT,
-            IntentCategory.ACCOUNT_SECURITY,
-            IntentCategory.REFUND,
-            IntentCategory.INVOICE,
-            IntentCategory.PAYMENT_ISSUE,
-        ):
-            scores[AgentType.BILLING] += 0.75
+        criminal_hits = sum(1 for kw in criminal_kws if kw in msg)
+        civil_hits = sum(1 for kw in civil_kws if kw in msg)
+        reception_hits = sum(1 for kw in reception_kws if kw in msg)
 
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "验证码"]
-        billing_kws = ["退款", "退货", "扣款", "发票", "账单", "支付", "订阅", "refund", "invoice", "多扣"]
-        general_kws = ["订单", "物流", "快递", "配送", "会员", "积分", "咨询", "帮助"]
+        scores[AgentType.CRIMINAL] += min(0.45, criminal_hits * 0.18)
+        scores[AgentType.CIVIL] += min(0.45, civil_hits * 0.18)
+        scores[AgentType.RECEPTION] += min(0.35, reception_hits * 0.12)
 
-        technical_hits = sum(1 for kw in technical_kws if kw in msg)
-        billing_hits = sum(1 for kw in billing_kws if kw in msg)
-        general_hits = sum(1 for kw in general_kws if kw in msg)
-
-        scores[AgentType.TECHNICAL] += min(0.45, technical_hits * 0.18)
-        scores[AgentType.BILLING] += min(0.45, billing_hits * 0.18)
-        scores[AgentType.GENERAL] += min(0.35, general_hits * 0.12)
-
-        entities = req.entities or {}
-        if entities.get("error_code"):
-            scores[AgentType.TECHNICAL] += 0.2
-        if entities.get("amount"):
-            scores[AgentType.BILLING] += 0.15
-        if entities.get("order_id"):
-            scores[AgentType.GENERAL] += 0.1
+        if LawRiskFlag.FILED in req.risk_flags or LawRiskFlag.PROSECUTION in req.risk_flags:
+            scores[AgentType.CRIMINAL] += 0.8
+        if LawRiskFlag.TRAFFIC_ACCIDENT in req.risk_flags or LawRiskFlag.INJURY in req.risk_flags:
+            scores[AgentType.CIVIL] += 0.8
+        if LawRiskFlag.NO_LAWYER in req.risk_flags:
+            scores[AgentType.CRIMINAL] += 0.3
+            scores[AgentType.CIVIL] += 0.3
+        if req.entities.get("blood_alcohol"):
+            scores[AgentType.CRIMINAL] += 0.2
+        if req.entities.get("disputed_amount"):
+            scores[AgentType.CIVIL] += 0.15
 
         return {agent_type: round(score, 3) for agent_type, score in scores.items()}
 
@@ -993,43 +1338,17 @@ class AgentOrchestrator:
             f"primary={primary_agent.value}, supporting={support_text}, scores=[{score_text}]"
         )
 
-    def _collaboration_targets(self, req: Request) -> List[AgentType]:
-        """
-        判断是否需要多个 Agent 并行协作。
-
-        意图识别通常只返回一个主意图；这里用领域关键词补充检测复合问题，
-        例如"登录报错且被重复扣款"需要技术和账单 Agent 同时处理。
-        """
-        msg = req.message.lower()
-        targets: List[AgentType] = []
-
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401"]
-        billing_kws = ["退款", "扣款", "发票", "账单", "支付", "订阅", "refund", "invoice"]
-
-        if req.intent in (
-            IntentCategory.TECHNICAL,
-            IntentCategory.TECHNICAL_LOGIN,
-            IntentCategory.TECHNICAL_CRASH,
-        ) or any(kw in msg for kw in technical_kws):
-            targets.append(AgentType.TECHNICAL)
-        if req.intent in (
-            IntentCategory.BILLING,
-            IntentCategory.ACCOUNT,
-            IntentCategory.ACCOUNT_SECURITY,
-            IntentCategory.REFUND,
-            IntentCategory.INVOICE,
-            IntentCategory.PAYMENT_ISSUE,
-        ) or any(kw in msg for kw in billing_kws):
-            targets.append(AgentType.BILLING)
-
-        # 保持顺序去重，并只返回当前有实例的 Agent 类型。
-        deduped = list(dict.fromkeys(targets))
-        return [agent_type for agent_type in deduped if self._pool.get(agent_type)]
-
     @staticmethod
     def _needs_clarification(req: Request) -> bool:
-        """低置信度且无明确意图时，先追问，避免误路由。"""
-        if req.intent != IntentCategory.OTHER:
+        """低置信度且无明确意图时先追问，但高风险条件必须跳过澄清直接升级。"""
+        if (
+            req.urgency == UrgencyLevel.CRITICAL
+            or LawRiskFlag.DETENTION in req.risk_flags
+            or LawRiskFlag.COURT_SOON in req.risk_flags
+            or req.intent == LawIntent.LAWYER_APPOINTMENT
+        ):
+            return False
+        if req.intent != LawIntent.OTHER:
             return False
         text = (req.message or "").strip()
         if len(text) <= 2:
@@ -1047,23 +1366,23 @@ class AgentOrchestrator:
         return max(agents, key=lambda a: a.stats.routing_score())
 
     async def _execute(self, req: Request, agent_type: AgentType) -> AgentResponse:
-        """执行 Agent，失败时降级到 GeneralAgent。"""
+        """执行律所 Agent，失败时降级到 ReceptionAgent。"""
         agent = self._best_agent(agent_type)
         if agent is None:
-            agent = self._best_agent(AgentType.GENERAL)
+            agent = self._best_agent(AgentType.RECEPTION)
         if agent is None:
             return AgentResponse(
-                agent_type=AgentType.GENERAL,
+                agent_type=AgentType.RECEPTION,
                 content="服务暂时不可用，请稍后重试。",
                 success=False,
             )
 
         response = await agent.handle(req)
 
-        # 专属 Agent 失败时降级到 GeneralAgent
-        if not response.success and agent_type not in (AgentType.GENERAL, AgentType.ESCALATION):
-            logger.warning(f"{agent_type.value} 失败，降级到 GeneralAgent")
-            fallback = self._best_agent(AgentType.GENERAL)
+        # 专属刑事/民事 Agent 失败时降级到 ReceptionAgent；Escalation 不使用 LLM，不降级。
+        if not response.success and agent_type not in (AgentType.RECEPTION, AgentType.ESCALATION):
+            logger.warning(f"{agent_type.value} 失败，降级到 ReceptionAgent")
+            fallback = self._best_agent(AgentType.RECEPTION)
             if fallback:
                 response = await fallback.handle(req)
 

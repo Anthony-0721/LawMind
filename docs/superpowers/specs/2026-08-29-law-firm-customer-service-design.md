@@ -1,7 +1,7 @@
 # LawMind 律所版：对外智能法律咨询系统设计文档
 
 - 日期：2026-08-29
-- 状态：已确认，待实施
+- 状态：已实施（2026-08-30）
 - 项目：LawMind
 - 目标：构建一个独立运行的律所对外智能法律咨询系统
 
@@ -44,7 +44,7 @@ LawMind 是一个多 Agent 法律咨询运行时，覆盖法律意图识别、�
 - 工作人员页
 - 管理员密码
 - 转人工 = 高优先级留资
-- 知识库/Skills 调试入口
+- 知识库/FAQ 同步与受保护的工作人员运维入口
 - 联合 Docker Compose
 
 ### 2.2 不包含
@@ -62,7 +62,7 @@ LawMind 是一个多 Agent 法律咨询运行时，覆盖法律意图识别、�
 - 不做角色权限
 - 不做复杂排班/日历
 - 不做真实收费支付
-- 暂不改造 Java 版
+- 不包含 Java/其他语言后端；全部后端服务统一为 Python 3.12 + FastAPI
 
 ---
 
@@ -95,7 +95,7 @@ LawMind 是一个多 Agent 法律咨询运行时，覆盖法律意图识别、�
 登录方式：
 
 ```text
-管理员密码，来自环境变量 LAW_FIRM_ADMIN_PASSWORD
+管理员密码，来自环境变量 LAWMIND_ADMIN_PASSWORD
 ```
 
 工作人员页模块：
@@ -300,17 +300,22 @@ Agent 不直接连接数据库
 首版 Skills 目录：
 
 ```text
-skills/law_firm/front_desk_reception/SKILL.md
-skills/law_firm/criminal_consultation/SKILL.md
-skills/law_firm/civil_consultation/SKILL.md
-skills/law_firm/escalation_and_intake/SKILL.md
+backend/skills/law_firm/front_desk_reception/SKILL.md
+backend/skills/law_firm/criminal_consultation/SKILL.md
+backend/skills/law_firm/civil_consultation/SKILL.md
+backend/skills/law_firm/escalation_and_intake/SKILL.md
 ```
 
-旧客服 Skills 移到：
+LawMind 只保留律所 Skills：
 
 ```text
-skills/_legacy_customer_support/
+backend/skills/law_firm/front_desk_reception/SKILL.md
+backend/skills/law_firm/criminal_consultation/SKILL.md
+backend/skills/law_firm/civil_consultation/SKILL.md
+backend/skills/law_firm/escalation_and_intake/SKILL.md
 ```
+
+旧客服 Skills 与原始私有内容不进入 LawMind 仓库。
 
 Skills 内容必须包含：
 
@@ -606,16 +611,12 @@ FAQ 管理
 调试台
 ```
 
-调试台包含：
+调试/运维视图包含（当前实际实现）：
 
 ```text
-Agent 状态
-路由结果
-工具调用 trace
-知识检索测试
-评测运行
-监控数据
-后端切换
+咨询、律师、FAQ 概览
+FAQ 知识库同步
+受管理员密码保护的状态数据
 ```
 
 ### 14.4 视觉策略
@@ -679,12 +680,12 @@ ChromaDB 失败：
 test_law_intent.py
 test_law_agents.py
 test_law_tools.py
-test_law_faq.py
-test_law_sync.py
-test_consultation_store.py
+test_law_faq_sync.py
+test_law_repositories.py
 test_law_api.py
-test_admin_auth.py
-test_lawyer_recommendation.py
+test_lawyer_consultation_services.py
+test_law_knowledge.py
+test_law_evaluator.py
 ```
 
 测试覆盖：
@@ -708,7 +709,7 @@ PostgreSQL 失败降级
 ## 18. 实施顺序
 
 1. 创建 `feature/law-consultation` 分支
-2. 将旧 Skills/知识内容移到 `_legacy`
+2. 仅保留律所 Skills；旧客服内容不进入 LawMind
 3. 替换意图识别与实体
 4. 替换 Agent 类型、Profile、工具白名单
 5. 新增律所 Skills
@@ -721,9 +722,9 @@ PostgreSQL 失败降级
 12. 实现工作人员 API
 13. 改造前端两个入口
 14. 接入联合 Docker Compose
-15. 重写评测用例
+15. 固化 LawMind 评测用例与回归基线
 16. 补充测试与回归
-17. 更新 README 和使用文档
+17. 更新 README、前后端说明与架构文档
 
 ---
 
@@ -742,6 +743,15 @@ PostgreSQL 失败降级
 - 一条命令可以通过 Docker 启动整套系统
 - 原始私有代码保留在本地，不进入 LawMind 仓库
 
+---
 
+## 20. 最终实现记录
 
-
+- 独立仓库分支：`feature/law-consultation`。
+- 后端：Python 3.12 + FastAPI；无 Java/其他语言后端。
+- 前端：Vue 3 + Vite；客户咨询页和 `/staff` 工作人员页。
+- 数据：PostgreSQL（咨询/律师/FAQ）、Redis（会话记忆）、ChromaDB（`law_knowledge_base`）。
+- Skill：仅保留 `backend/skills/law_firm/` 下 4 个律所 Skill。
+- 部署：根目录 `docker-compose.yml` 为唯一入口，Nginx 统一代理。
+- 评测：`backend/data/eval/law_baseline.json` 为只读归档；`backend/data/eval/runtime_law_baseline.json` 为运行时基线；包含 LLM-as-Judge、免责声明强制边界和回归检查。
+- 实现说明：[docs/architecture.md](../architecture.md)。

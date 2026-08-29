@@ -13,12 +13,122 @@ ChromaDB 在这里的角色：
 """
 import asyncio
 import hashlib
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import chromadb
 
 logger = logging.getLogger(__name__)
+
+LAW_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+LAW_FAQ_SEED_PATH = LAW_DATA_DIR / "law_faq_seed.json"
+LAW_DOMAIN_BRIEFS_DIR = LAW_DATA_DIR / "law_domain_briefs"
+
+_LAW_CATEGORY_LABELS = {
+    "dangerous_driving": "危险驾驶",
+    "criminal": "刑事/醉驾",
+    "criminal_defense": "刑事辩护",
+    "labor_dispute": "劳动争议",
+    "marriage_family": "婚姻家事",
+    "contract_dispute": "合同纠纷",
+    "traffic_accident": "交通事故",
+    "civil_loan": "民间借贷",
+    "service": "律所服务",
+}
+
+_LAW_GENERAL_DISCLAIMER = (
+    "温馨提示：以上内容仅为一般法律知识，不构成正式法律意见；"
+    "具体案件请结合实际材料咨询执业律师，紧急或复杂事项应尽快转人工。"
+)
+
+
+def _law_keywords(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def load_law_faq_documents(
+    data_dir: Optional[Union[str, Path]] = None,
+) -> List[Dict[str, Any]]:
+    """从 law_faq_seed.json 加载启用的律所 FAQ，并转换为 RAG 文档。"""
+    faq_path = Path(data_dir) / "law_faq_seed.json" if data_dir is not None else LAW_FAQ_SEED_PATH
+    if not faq_path.exists():
+        raise FileNotFoundError(f"律所 FAQ 种子文件不存在: {faq_path}")
+
+    raw = json.loads(faq_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("law_faq_seed.json 必须是一个数组")
+
+    documents: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or item.get("active") is False:
+            continue
+        category = str(item.get("category") or "").strip()
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        keywords = _law_keywords(item.get("keywords"))
+        if not question or not answer:
+            continue
+
+        category_label = _LAW_CATEGORY_LABELS.get(category, category)
+        content = (
+            f"领域：{category_label}（{category}）\n"
+            f"问题：{question}\n"
+            f"回答：{answer}\n"
+            f"关键词：{'、'.join(keywords)}\n"
+            f"{_LAW_GENERAL_DISCLAIMER}"
+        )
+        documents.append({
+            "title": f"FAQ｜{category_label}｜{question}",
+            "content": content,
+            "metadata": {
+                "source": "law_firm",
+                "doc_type": "faq",
+                "category": category,
+                "active": True,
+                "keywords": keywords,
+            },
+        })
+    return documents
+
+
+def load_law_domain_briefs(
+    data_dir: Optional[Union[str, Path]] = None,
+) -> List[Dict[str, Any]]:
+    """加载 law_domain_briefs/*.md 中的律所领域知识摘要。"""
+    root = LAW_DOMAIN_BRIEFS_DIR if data_dir is None else Path(data_dir)
+    if not root.exists():
+        raise FileNotFoundError(f"律所领域摘要目录不存在: {root}")
+
+    documents: List[Dict[str, Any]] = []
+    for path in sorted(root.glob("*.md")):
+        raw_content = path.read_text(encoding="utf-8").strip()
+        content = f"{raw_content}\n\n{_LAW_GENERAL_DISCLAIMER}"
+        if not content:
+            continue
+        title = path.stem
+        for line in content.splitlines():
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+        documents.append({
+            "title": title,
+            "content": content,
+            "metadata": {
+                "source": "law_firm",
+                "doc_type": "domain_brief",
+                "domain": path.stem,
+                "category": path.stem,
+                "active": True,
+            },
+        })
+    return documents
+
 
 
 class KnowledgeBase:
@@ -30,7 +140,7 @@ class KnowledgeBase:
     不需要额外调用 Anthropic Embeddings API。
     """
 
-    COLLECTION_NAME = "knowledge_base"
+    COLLECTION_NAME = "law_knowledge_base"
 
     def __init__(
         self,
@@ -57,6 +167,12 @@ class KnowledgeBase:
                 settings=chromadb.Settings(anonymized_telemetry=False),
             )
 
+        # 清理旧客服知识库集合，避免遗留内容参与律所检索。
+        try:
+            self._client.delete_collection("knowledge_base")
+        except Exception:
+            logger.info("旧知识库集合不存在或无需清理")
+
         # 使用服务端时不传 embedding_function，让服务端处理
         # 本地模式时也不传，使用 ChromaDB 默认的（会触发模型下载）
         self._collection = self._client.get_or_create_collection(
@@ -70,36 +186,102 @@ class KnowledgeBase:
 
     # ── 文档管理 ──────────────────────────────────────────────────────────────
 
-    def add_documents(self, documents: List[Dict[str, str]]) -> int:
+    def delete_by_metadata(self, where: Mapping[str, Any]) -> int:
+        """Delete vectors matching metadata filters (for example FAQ id)."""
+        deleted = self._collection.delete(where=dict(where))
+        if deleted is None:
+            return 0
+        if isinstance(deleted, (list, tuple, set)):
+            return len(deleted)
+        try:
+            return int(deleted)
+        except (TypeError, ValueError):
+            return 0
+
+    def delete_faq_vectors(self) -> int:
+        """Delete legacy/orphan vectors created by the old FAQ seed loader."""
+        return self.delete_by_metadata({"doc_type": "faq"})
+
+    def add_documents(
+        self,
+        documents: List[Dict[str, Any]],
+        metadatas: Optional[Sequence[Mapping[str, Any]]] = None,
+        ids: Optional[Sequence[str]] = None,
+    ) -> int:
         """
         批量导入文档到知识库。
 
-        documents 格式: [{"title": "...", "content": "..."}, ...]
+        documents 格式: [{"title": "...", "content": "...", "metadata": {...}}, ...]
         长文档会自动切片（每片 500 字）。
+        可通过 doc["id"] 或 ids 参数指定稳定 ID；通过 doc["metadata"] 或
+        metadatas 参数写入 Chroma metadata。
         """
-        ids, docs, metas = [], [], []
+        if isinstance(ids, str):
+            explicit_ids = [ids]
+        else:
+            explicit_ids = list(ids or [])
+        if explicit_ids and len(explicit_ids) != len(documents):
+            raise ValueError("ids length must match documents length")
+        if isinstance(metadatas, Mapping):
+            explicit_metas = [dict(metadatas)] * len(documents)
+        elif metadatas is not None:
+            explicit_metas = list(metadatas)
+        else:
+            explicit_metas = [None] * len(documents)
+        if len(explicit_metas) != len(documents):
+            raise ValueError("metadatas length must match documents length")
 
-        for doc in documents:
+        ids_out, docs, metas = [], [], []
+
+        for index, doc in enumerate(documents):
             title   = doc.get("title", "")
             content = doc.get("content", "")
             chunks  = self._chunk_text(content, chunk_size=500)
+            explicit_id = str(doc.get("id") or "").strip() or (
+                explicit_ids[index] if explicit_ids else ""
+            )
 
             for i, chunk in enumerate(chunks):
-                doc_id = hashlib.md5(f"{title}_{i}_{chunk[:50]}".encode()).hexdigest()
-                ids.append(doc_id)
+                if explicit_id:
+                    doc_id = explicit_id if i == 0 else f"{explicit_id}:{i}"
+                else:
+                    doc_id = hashlib.md5(f"{title}_{i}_{chunk[:50]}".encode()).hexdigest()
+                ids_out.append(doc_id)
                 docs.append(chunk)
-                metas.append({"title": title, "chunk_index": i, "total_chunks": len(chunks)})
+                meta = {
+                    "title": title,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks),
+                    "source": "law_firm",
+                }
+                for source_meta in (doc.get("metadata") or {}, explicit_metas[index] or {}):
+                    for key, value in source_meta.items():
+                        if isinstance(value, (list, dict, tuple)):
+                            meta[key] = json.dumps(value, ensure_ascii=False)
+                        else:
+                            meta[key] = value
+                metas.append(meta)
 
-        if ids:
+        if ids_out:
             # ChromaDB 会自动生成 Embedding
-            self._collection.add(ids=ids, documents=docs, metadatas=metas)
-            logger.info(f"知识库导入 {len(ids)} 个文档片段")
+            self._collection.add(ids=ids_out, documents=docs, metadatas=metas)
+            logger.info(f"知识库导入 {len(ids_out)} 个文档片段")
 
-        return len(ids)
+        return len(ids_out)
 
-    async def add_documents_async(self, documents: List[Dict[str, str]]) -> int:
+    async def add_documents_async(
+        self,
+        documents: List[Dict[str, Any]],
+        metadatas: Optional[Sequence[Mapping[str, Any]]] = None,
+        ids: Optional[Sequence[str]] = None,
+    ) -> int:
         """异步导入文档；ChromaDB 客户端为同步实现，因此放入线程池执行。"""
-        return await asyncio.to_thread(self.add_documents, documents)
+        return await asyncio.to_thread(
+            self.add_documents,
+            documents,
+            metadatas=metadatas,
+            ids=ids,
+        )
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
@@ -124,6 +306,9 @@ class KnowledgeBase:
                     "content":  doc,
                     "score":    round(1.0 - dist, 4),  # ChromaDB 返回距离，转为相似度
                     "chunk":    meta.get("chunk_index", 0),
+                    "metadata": dict(meta),
+                    "faq_id":   meta.get("faq_id", ""),
+                    "category": meta.get("category", ""),
                 })
 
         return items
@@ -184,77 +369,10 @@ class KnowledgeBase:
         return chunks
 
     def _load_default_docs(self) -> None:
-        """导入默认知识库文档（客服场景常见问题）。"""
-        default_docs = [
-            {
-                "title": "退款政策",
-                "content": (
-                    "退款政策说明。"
-                    "用户在购买后 7 天内可以申请无理由退款。"
-                    "退款申请提交后，系统会在 1-3 个工作日内审核。"
-                    "审核通过后，款项将在 5-7 个工作日内退回原支付账户。"
-                    "如果商品已发货，需要先完成退货流程才能退款。"
-                    "退货运费由用户承担，除非是商品质量问题。"
-                    "超过 7 天但未超过 30 天的订单，需要提供商品质量问题的证据才能退款。"
-                ),
-            },
-            {
-                "title": "订单查询",
-                "content": (
-                    "订单查询指南。"
-                    "用户可以通过订单号查询订单状态。"
-                    "订单状态包括：待支付、已支付、已发货、运输中、已签收、已完成。"
-                    "如果订单显示已发货但超过 7 天未收到，可以联系客服申请查件。"
-                    "物流信息通常在发货后 24 小时内更新。"
-                    "如果订单显示异常，请提供订单号联系客服处理。"
-                ),
-            },
-            {
-                "title": "账户安全",
-                "content": (
-                    "账户安全说明。"
-                    "建议用户定期修改密码，密码长度至少 8 位，包含字母和数字。"
-                    "如果忘记密码，可以通过绑定的手机号或邮箱重置。"
-                    "发现账户异常登录时，系统会自动锁定账户并发送通知。"
-                    "用户可以在安全设置中开启两步验证，提高账户安全性。"
-                    "不要将密码分享给他人，客服人员不会索要用户密码。"
-                ),
-            },
-            {
-                "title": "技术故障排查",
-                "content": (
-                    "常见技术问题排查。"
-                    "应用崩溃：请尝试清除缓存后重启应用，如果问题持续请更新到最新版本。"
-                    "登录失败 401 错误：表示认证失败，请检查用户名密码是否正确，或尝试重置密码。"
-                    "页面加载慢：检查网络连接，尝试切换 WiFi 或移动数据。"
-                    "支付失败：确认银行卡余额充足，检查是否开启了网上支付功能。"
-                    "500 服务器错误：这是服务端问题，请稍后重试，如果持续出现请联系技术支持。"
-                ),
-            },
-            {
-                "title": "会员与积分",
-                "content": (
-                    "会员积分规则。"
-                    "每消费 1 元累积 1 积分。"
-                    "积分可以在下次购物时抵扣，100 积分 = 1 元。"
-                    "会员等级分为：普通会员、银卡会员（累计消费 1000 元）、金卡会员（累计消费 5000 元）。"
-                    "银卡会员享受 95 折优惠，金卡会员享受 9 折优惠。"
-                    "积分有效期为 1 年，过期自动清零。"
-                    "生日当月消费可获得双倍积分。"
-                ),
-            },
-            {
-                "title": "配送说明",
-                "content": (
-                    "配送服务说明。"
-                    "标准配送：3-5 个工作日送达，免运费（订单满 99 元）。"
-                    "加急配送：1-2 个工作日送达，运费 15 元。"
-                    "同城配送：当日达或次日达，运费 10 元。"
-                    "偏远地区可能需要额外 2-3 天。"
-                    "配送时间为每天 9:00-18:00，节假日可能延迟。"
-                    "如果需要修改收货地址，请在发货前联系客服。"
-                ),
-            },
-        ]
-        self.add_documents(default_docs)
-        logger.info(f"已导入默认知识库: {len(default_docs)} 篇文档")
+        """导入默认法律知识库（领域摘要；FAQ 由 FaqSyncService 管理）。"""
+        domain_briefs = load_law_domain_briefs()
+        self.add_documents(domain_briefs)
+        logger.info(
+            "已导入默认律所知识库: 领域摘要 %d 篇",
+            len(domain_briefs),
+        )

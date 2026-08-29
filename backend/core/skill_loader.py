@@ -37,6 +37,21 @@ class Skill:
         if self.agents and agent_type and agent_type.lower() not in self.agents:
             return False
 
+        # Escalation is a deterministic gate: always inject the escalation skill
+        # for escalation AgentType requests, regardless of message keywords.
+        normalized_path = self.path.replace("\\", "/")
+        is_escalation_skill = (
+            "escalation" in self.agents
+            or normalized_path.endswith("/law_firm/escalation_and_intake/SKILL.md")
+            or normalized_path.endswith("escalation_and_intake/SKILL.md")
+        )
+        if (
+            agent_type
+            and agent_type.lower() == "escalation"
+            and is_escalation_skill
+        ):
+            return True
+
         if not self.keywords:
             return True
 

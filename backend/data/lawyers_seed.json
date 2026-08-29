@@ -1,0 +1,62 @@
+[
+  {
+    "name": "张律师（示例）",
+    "domain": "dangerous_driving",
+    "specialties": [
+      "醉驾",
+      "危险驾驶",
+      "刑事辩护"
+    ],
+    "intro": "示例律师，擅长醉驾、危险驾驶和刑事程序初步咨询。",
+    "active": true,
+    "sort_order": 1
+  },
+  {
+    "name": "李律师（示例）",
+    "domain": "criminal_defense",
+    "specialties": [
+      "刑事辩护",
+      "取保候审",
+      "审查起诉"
+    ],
+    "intro": "示例律师，关注刑事拘留、取保候审和审查起诉阶段的程序问题。",
+    "active": true,
+    "sort_order": 2
+  },
+  {
+    "name": "王律师（示例）",
+    "domain": "labor_dispute",
+    "specialties": [
+      "劳动争议",
+      "劳动仲裁",
+      "工资拖欠"
+    ],
+    "intro": "示例律师，熟悉劳动争议、劳动合同和仲裁程序。",
+    "active": true,
+    "sort_order": 3
+  },
+  {
+    "name": "陈律师（示例）",
+    "domain": "marriage_family",
+    "specialties": [
+      "离婚",
+      "抚养权",
+      "财产分割"
+    ],
+    "intro": "示例律师，关注婚姻家事、子女抚养和财产分割咨询。",
+    "active": true,
+    "sort_order": 4
+  },
+  {
+    "name": "刘律师（示例）",
+    "domain": "contract_dispute",
+    "specialties": [
+      "合同纠纷",
+      "买卖合同",
+      "欠款追讨"
+    ],
+    "intro": "示例律师，擅长合同审查、违约和欠款追讨咨询。",
+    "active": true,
+    "sort_order": 5
+  }
+]

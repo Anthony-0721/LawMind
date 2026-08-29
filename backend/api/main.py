@@ -1,5 +1,5 @@
 """
-LawMind 智能客服系统 — FastAPI 入口
+LawMind 律所多 Agent 咨询系统 — FastAPI 入口
 
 启动时打印小熊饼干图案。
 所有核心组件在 lifespan 中初始化，通过环境变量配置。
@@ -37,7 +37,7 @@ BANNER = r"""
     ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ
    ╔══════════════════════╗
    ║   LawMind  v2.0     ║
-   ║   智能客服 AI 系统    ║
+   ║   律所多 Agent 咨询系统    ║
    ╚══════════════════════╝
     ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ
 """
@@ -49,6 +49,30 @@ _tool_manager = None
 _monitor      = None
 _evaluator    = None
 _skill_manager = None
+_lawyer_service = None
+_consultation_service = None
+_faq_sync_service = None
+_session_factory = None
+
+_LEGACY_ENV_PREFIX = "RETIRED_"
+
+
+def _env_or_legacy(name: str, default: str) -> str:
+    """Read a LAWMIND env value first, then fall back to the legacy deployment name."""
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return value
+    suffix = name[len("LAWMIND_"):] if name.startswith("LAWMIND_") else name
+    legacy = os.getenv(_LEGACY_ENV_PREFIX + suffix, default)
+    return legacy if legacy not in (None, "") else default
+
+
+def _env_int_or_legacy(name: str, default: int) -> int:
+    try:
+        return int(_env_or_legacy(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
 
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -66,13 +90,17 @@ def _anthropic_cfg() -> Dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
+    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager, _lawyer_service, _consultation_service, _faq_sync_service, _session_factory
 
     print(BANNER, flush=True)
 
-    from agents.agent_orchestrator import AgentOrchestrator, Request, build_shared_rag_tools
-    from core.intent_recognizer import IntentRecognizer
-    from evaluation.evaluator import EndToEndEvaluator
+    from agents.agent_orchestrator import AgentOrchestrator, Request, build_shared_law_rag_tools
+    from core.intent_recognizer import LawIntentRecognizer
+    from evaluation.evaluator import (
+        RUNTIME_BASELINE_PATH as DEFAULT_RUNTIME_BASELINE_PATH,
+        SHIPPED_BASELINE_PATH as DEFAULT_SHIPPED_BASELINE_PATH,
+        EndToEndEvaluator,
+    )
     from mcp.knowledge_base import KnowledgeBase
     from mcp.tool_manager import MCPToolManager, Tool
     from memory.conversation_memory import MemoryManager
@@ -83,27 +111,20 @@ async def lifespan(app: FastAPI):
     logger.info(f"模型: {cfg['model']}  base_url: {cfg.get('base_url', '(官方)')}")
 
     # 意图识别器（Orchestrator 内部也会创建，这里单独暴露给 Evaluator）
-    recognizer = IntentRecognizer(
+    recognizer = LawIntentRecognizer(
         api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
         model=cfg["model"],
     )
 
     # Skills：启动时从目录加载业务能力说明，并在 Agent 调用 LLM 时动态注入。
-    skills_dir = os.getenv("legacy_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills"))
+    skills_dir = _env_or_legacy("LAWMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm"))
     _skill_manager = SkillManager(
         root_dir=skills_dir,
-        max_prompt_chars=int(os.getenv("legacy_SKILLS_MAX_PROMPT_CHARS", "5000")),
+        max_prompt_chars=_env_int_or_legacy("LAWMIND_SKILLS_MAX_PROMPT_CHARS", 5000),
     )
     _skill_manager.load()
 
-    # Agent 编排器
-    _orchestrator = AgentOrchestrator(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        model=cfg["model"],
-        skill_manager=_skill_manager,
-    )
+    # Agent 编排器将在数据库服务初始化后构建。
 
     # 记忆管理器（Redis 工作记忆 + ChromaDB 情景记忆/用户画像）
     _memory = MemoryManager(
@@ -128,6 +149,38 @@ async def lifespan(app: FastAPI):
         chroma_path=os.getenv("CHROMA_PERSIST_DIRECTORY", "/app/data/chroma"),
     )
     logger.info(f"知识库已加载: {await kb.doc_count_async()} 个文档片段")
+
+    from db.database import SessionLocal
+    from services.bootstrap import bootstrap_law_data
+
+    data_root = pathlib.Path(_ROOT) / "data"
+    bootstrap_context = bootstrap_law_data(
+        SessionLocal,
+        kb,
+        data_root / "law_faq_seed.json",
+        data_root / "lawyers_seed.json",
+    )
+    logger.info(
+        "律所数据初始化完成: faq_seeded=%s, lawyer_seeded=%s, "
+        "faq_synced=%s, faq_failed=%s",
+        bootstrap_context["faq_seeded"],
+        bootstrap_context["lawyer_seeded"],
+        bootstrap_context["faq_synced"],
+        bootstrap_context["faq_failed"],
+    )
+    _lawyer_service = bootstrap_context["lawyer_service"]
+    _consultation_service = bootstrap_context["consultation_service"]
+    _session_factory = bootstrap_context["session_factory"]
+
+    # Agent 编排器
+    _orchestrator = AgentOrchestrator(
+        api_key=cfg["api_key"],
+        base_url=cfg.get("base_url"),
+        model=cfg["model"],
+        skill_manager=_skill_manager,
+        lawyer_service=_lawyer_service,
+        consultation_service=_consultation_service,
+    )
 
     def knowledge_fallback(params: Dict[str, Any], context: Optional[Dict[str, Any]], error: str):
         query = params.get("query", "")
@@ -156,7 +209,33 @@ async def lifespan(app: FastAPI):
         fallback=knowledge_fallback,
     ))
     if _orchestrator is not None:
-        _orchestrator.set_shared_tools(build_shared_rag_tools(_tool_manager))
+        _orchestrator.set_shared_tools(build_shared_law_rag_tools(_tool_manager))
+
+    # 注入律所 API 服务（仅暴露给请求，不记录完整上下文）。
+    from api.law_routes import configure_app_law_services, configure_law_router
+
+    _faq_sync_service = bootstrap_context["faq_sync_service"]
+    configure_app_law_services(
+        app,
+        lawyer_service=_lawyer_service,
+        consultation_service=_consultation_service,
+        faq_sync_service=_faq_sync_service,
+        orchestrator=_orchestrator,
+        memory=_memory,
+        law_recognizer=recognizer,
+        knowledge_base=kb,
+        session_factory=_session_factory,
+    )
+    configure_law_router(
+        lawyer_service=_lawyer_service,
+        consultation_service=_consultation_service,
+        faq_sync_service=_faq_sync_service,
+        orchestrator=_orchestrator,
+        memory=_memory,
+        law_recognizer=recognizer,
+        knowledge_base=kb,
+        session_factory=_session_factory,
+    )
 
     # 性能监控（可选启动 Prometheus）
     prom_port = int(os.getenv("PROMETHEUS_PORT", "0")) or None
@@ -176,7 +255,8 @@ async def lifespan(app: FastAPI):
         api_key=cfg["api_key"],
         base_url=cfg.get("base_url"),
         model=cfg["model"],
-        baseline_path=os.getenv("EVAL_BASELINE_PATH", "/app/data/eval/baseline.json"),
+        baseline_path=os.getenv("EVAL_BASELINE_PATH") or DEFAULT_RUNTIME_BASELINE_PATH,
+        shipped_baseline_path=os.getenv("EVAL_SHIPPED_BASELINE_PATH") or DEFAULT_SHIPPED_BASELINE_PATH,
     )
 
     logger.info("LawMind 已就绪")
@@ -190,7 +270,7 @@ async def lifespan(app: FastAPI):
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="LawMind 智能客服",
+    title="LawMind 律所多 Agent 咨询",
     version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
@@ -202,6 +282,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 律所对外/工作人员 API：路由在服务初始化前注册，服务在 lifespan 中注入。
+from api.law_routes import law_router
+
+app.include_router(law_router)
+
+
+def _knowledge_used(result: Any) -> bool:
+    """True only when a search_law_knowledge tool call completed successfully."""
+    traces = getattr(result, "tool_traces", None)
+    if traces is None and isinstance(result, dict):
+        traces = result.get("tool_traces", [])
+    return any(
+        trace.get("tool_name") == "search_law_knowledge"
+        and trace.get("success", True) is not False
+        and trace.get("result_success", trace.get("success", True)) is True
+        for trace in (traces or [])
+    )
 
 
 # ── 请求/响应模型 ─────────────────────────────────────────────────────────────
@@ -305,6 +404,7 @@ async def chat(req: ChatRequest):
         intent=intent_result.intent,
         intent_group=intent_result.intent_group,
         urgency=intent_result.urgency,
+        risk_flags=intent_result.risk_flags,
         intent_confidence=intent_result.confidence,
     )
 
@@ -333,7 +433,7 @@ async def chat(req: ChatRequest):
         routing_confidence=result.routing_confidence,
         escalated=result.escalated,
         latency_ms=round(result.latency_ms, 1),
-        knowledge_used="search_knowledge_base" in result.tools_used,
+        knowledge_used=_knowledge_used(result),
         entities=intent_result.entities,
         intent_confidence=round(intent_result.confidence, 4),
         intent_source_scores=intent_result.source_scores,
@@ -383,23 +483,28 @@ def _should_use_knowledge(message: str, intent=None) -> bool:
     if not msg:
         return False
     intent_value = getattr(intent, "value", intent)
-    if intent_value in {"greeting", "feedback", "escalation", "human_handoff", "other"}:
-        return False
+    if intent_value in {"other", "law_firm_service"}:
+        return True
     if intent_value in {
-        "query", "request", "technical", "billing", "account", "complaint",
-        "order_status", "logistics", "refund", "invoice", "payment_issue",
-        "account_security", "technical_login", "technical_crash",
+        "dangerous_driving",
+        "criminal_defense",
+        "labor_dispute",
+        "marriage_family",
+        "contract_dispute",
+        "traffic_accident",
+        "civil_loan",
+        "lawyer_appointment",
     }:
         return True
     greetings = {"你好", "您好", "嗨", "hi", "hello", "hey", "早上好", "晚上好"}
     if msg in greetings:
         return False
-    business_keywords = [
-        "退款", "订单", "物流", "配送", "发票", "扣款", "支付", "账单", "订阅",
-        "登录", "报错", "错误", "崩溃", "会员", "积分", "账户", "密码", "地址",
-        "refund", "order", "invoice", "payment", "error", "login",
+    law_keywords = [
+        "醉驾", "酒驾", "刑事", "拘留", "取保", "开庭", "辩护",
+        "劳动", "工资", "仲裁", "离婚", "抚养", "合同", "违约",
+        "交通事故", "车祸", "借贷", "借条", "欠款", "律师",
     ]
-    return len(msg) >= 4 or any(kw in msg for kw in business_keywords)
+    return len(msg) >= 4 or any(kw in msg for kw in law_keywords)
 
 
 @app.get("/monitor")
@@ -492,8 +597,8 @@ async def add_knowledge(body: BatchDocInput):
     ```json
     {
       "documents": [
-        {"title": "退款政策", "content": "用户在购买后 7 天内可以申请无理由退款..."},
-        {"title": "配送说明", "content": "标准配送 3-5 个工作日..."}
+        {"title": "醉驾咨询", "content": "醉驾案件通常涉及刑事程序..."},
+        {"title": "劳动仲裁流程", "content": "劳动争议可先申请劳动仲裁..."}
       ]
     }
     ```
@@ -624,8 +729,8 @@ async def _cli():
 
     cfg = _anthropic_cfg()
     skill_manager = SkillManager(
-        root_dir=os.getenv("legacy_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills")),
-        max_prompt_chars=int(os.getenv("legacy_SKILLS_MAX_PROMPT_CHARS", "5000")),
+        root_dir=_env_or_legacy("LAWMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm")),
+        max_prompt_chars=_env_int_or_legacy("LAWMIND_SKILLS_MAX_PROMPT_CHARS", 5000),
     )
     skill_manager.load()
     orch = AgentOrchestrator(

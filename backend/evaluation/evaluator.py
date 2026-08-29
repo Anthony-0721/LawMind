@@ -27,9 +27,16 @@ from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
 
-from core.intent_recognizer import IntentCategory, IntentRecognizer
 
 logger = logging.getLogger(__name__)
+
+
+# 归档基线：只读，用于首次运行对比，禁止运行评测覆写。
+SHIPPED_BASELINE_PATH = str(pathlib.Path(__file__).resolve().parents[1] / "data" / "eval" / "law_baseline.json")
+# 运行时基线：由运行结果生成/更新，可由 EVAL_BASELINE_PATH 覆盖。
+RUNTIME_BASELINE_PATH = str(pathlib.Path(__file__).resolve().parents[1] / "data" / "eval" / "runtime_law_baseline.json")
+# 向后兼容名称：默认指向运行时基线。
+DEFAULT_BASELINE_PATH = RUNTIME_BASELINE_PATH
 
 
 # ── 数据结构 ──────────────────────────────────────────────────────────────────
@@ -82,7 +89,7 @@ class EvalReport:
 
 class LLMJudge:
     """
-    用 LLM 评判 Agent 响应质量。
+    用 LLM 评判律所 Agent 法律咨询回复质量。
 
     为什么用 LLM 而不是人工？
     - 可规模化：数千条测试用例自动评测
@@ -92,21 +99,23 @@ class LLMJudge:
     注意：LLM Judge 本身也有偏差，建议定期用人工标注校准。
     """
 
-    JUDGE_PROMPT = """你是一个客服质量评估专家。请对以下客服响应进行评分。
+    JUDGE_PROMPT = """你是一个法律咨询质量评估专家。请对以下律所 AI 法律咨询回复进行评分。
 
-用户问题: {question}
-Agent 响应: {response}
+用户法律问题: {question}
+律所 AI 回复: {response}
 {context_section}
 
 请从以下四个维度评分（0.0-1.0），返回 JSON：
-- relevance: 响应是否直接针对用户问题（0=完全无关，1=完全相关）
-- accuracy: 信息是否准确无误（0=明显错误，1=完全正确）
-- completeness: 是否完整解决了用户需求（0=完全没解决，1=完全解决）
-- helpfulness: 用户能否据此采取行动（0=毫无帮助，1=非常有帮助）
+- relevance: 回复是否直接针对用户的法律问题（0=完全无关，1=完全相关）
+- accuracy: 法律信息是否准确，且没有作出确定性诉讼结果承诺（0=明显错误，1=完全正确）
+- completeness: 是否完整说明了法律风险、边界与下一步（0=完全没解决，1=完全解决）
+- helpfulness: 用户能否据此采取合规行动（0=毫无帮助，1=非常有帮助）
+
+注意：AI 初步回复不是正式法律意见；评分时不得把未检索到的法条、未核验事实或律师承诺视为正确输出。
 
 只返回 JSON，例如: {{"relevance": 0.9, "accuracy": 0.8, "completeness": 0.7, "helpfulness": 0.85}}"""
 
-    def __init__(self, client: AsyncAnthropic, model: str):
+    def __init__(self, client: Any, model: str):
         self._client = client
         self._model  = model
 
@@ -160,7 +169,7 @@ Agent 响应: {response}
 class IntentEvaluator:
     """评测意图识别的准确率和 F1。"""
 
-    def __init__(self, recognizer: IntentRecognizer):
+    def __init__(self, recognizer: Any):
         self._recognizer = recognizer
 
     async def evaluate(self, cases: List[IntentTestCase]) -> Dict[str, Any]:
@@ -177,7 +186,7 @@ class IntentEvaluator:
                 "expected": case.expected_intent,
                 "predicted": predicted,
                 "confidence": result.confidence,
-                "reasoning": result.reasoning,
+                "reasoning": getattr(result, "reasoning", ""),
             })
 
         # 纯 Python 计算指标
@@ -227,22 +236,28 @@ class EndToEndEvaluator:
     def __init__(
         self,
         orchestrator,
-        recognizer: IntentRecognizer,
+        recognizer: Any,
         api_key:  str,
         base_url: Optional[str] = None,
         model:    str = "claude-3-5-sonnet-20241022",
         baseline_path: Optional[str] = None,
+        shipped_baseline_path: Optional[str] = None,
+        client: Optional[Any] = None,
     ):
-        kwargs: Dict[str, Any] = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        client = AsyncAnthropic(**kwargs)
+        if client is None:
+            kwargs: Dict[str, Any] = {"api_key": api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            client = AsyncAnthropic(**kwargs)
 
         self._orchestrator     = orchestrator
         self._judge            = LLMJudge(client, model)
         self._intent_evaluator = IntentEvaluator(recognizer)
         self._history:         List[EvalReport] = []
         self._baseline_path = pathlib.Path(baseline_path) if baseline_path else None
+        self._shipped_baseline_path = (
+            pathlib.Path(shipped_baseline_path) if shipped_baseline_path else pathlib.Path(SHIPPED_BASELINE_PATH)
+        )
         self._baseline: Optional[EvalReport] = self._load_baseline()
 
     async def run(
@@ -431,19 +446,34 @@ class EndToEndEvaluator:
         return self._history
 
     def _load_baseline(self) -> Optional[EvalReport]:
-        if not self._baseline_path or not self._baseline_path.exists():
-            return None
+        if self._baseline_path is not None and self._baseline_path.exists():
+            report = self._read_baseline(self._baseline_path)
+            if report is not None:
+                return report
+        # 运行时基线缺失时，只把归档基线作为对比参照，不写回。
+        if self._shipped_baseline_path is not None and self._shipped_baseline_path.exists():
+            return self._read_baseline(self._shipped_baseline_path)
+        return None
+
+    @staticmethod
+    def _read_baseline(path: pathlib.Path) -> Optional[EvalReport]:
         try:
-            data = json.loads(self._baseline_path.read_text(encoding="utf-8"))
-            return self._report_from_dict(data)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return EndToEndEvaluator._report_from_dict(data)
         except Exception as ex:
-            logger.warning(f"读取评测基线失败: {ex}")
+            logger.warning(f"读取评测基线失败: {path}: {ex}")
             return None
 
     def _save_baseline(self, report: EvalReport) -> None:
         if not self._baseline_path:
             return
         try:
+            if (
+                self._shipped_baseline_path is not None
+                and self._baseline_path.resolve() == self._shipped_baseline_path.resolve()
+            ):
+                logger.warning("拒绝覆写只读归档基线，请使用 runtime_law_baseline.json")
+                return
             self._baseline_path.parent.mkdir(parents=True, exist_ok=True)
             self._baseline_path.write_text(
                 json.dumps(asdict(report), ensure_ascii=False, indent=2),
@@ -479,23 +509,23 @@ class EndToEndEvaluator:
 # ── 内置测试用例（开箱即用）──────────────────────────────────────────────────
 
 DEFAULT_INTENT_CASES: List[IntentTestCase] = [
-    IntentTestCase("我的订单什么时候到？",       "logistics"),
-    IntentTestCase("帮我取消订单",               "request"),
-    IntentTestCase("你们服务太差了！",            "complaint"),
-    IntentTestCase("应用一直报500错误",           "technical_crash"),
-    IntentTestCase("为什么扣了两次款？",          "payment_issue"),
-    IntentTestCase("我要投诉，转人工！",          "human_handoff"),
-    IntentTestCase("你好",                        "greeting"),
-    IntentTestCase("修改我的邮箱地址",            "account"),
-    IntentTestCase("帮我开发票",                  "invoice"),
-    IntentTestCase("退款多久到账？",              "refund"),
-    IntentTestCase("登录一直报401",               "technical_login"),
+    IntentTestCase("我可能醉驾被查了，会怎么样？", "dangerous_driving"),
+    IntentTestCase("家人已经被刑事拘留，想找辩护律师", "criminal_defense"),
+    IntentTestCase("公司拖欠工资，我想申请劳动仲裁", "labor_dispute"),
+    IntentTestCase("我想咨询离婚和抚养权", "marriage_family"),
+    IntentTestCase("合同纠纷，对方违约，想起诉", "contract_dispute"),
+    IntentTestCase("交通事故责任认定和赔偿", "traffic_accident"),
+    IntentTestCase("民间借贷，对方欠钱不还，有借条", "civil_loan"),
+    IntentTestCase("帮我预约律师", "lawyer_appointment"),
 ]
 
 DEFAULT_DIALOG_CASES: List[Dict[str, Any]] = [
-    {"question": "我的订单 #12345 还没到，已经超时了"},
-    {"question": "应用登录一直报错 401"},
-    {"question": "为什么这个月多扣了 50 块钱？"},
-    {"question": "帮我把收货地址改成北京市朝阳区"},
-    {"turns": ["你好，我想退款", "订单号是 #12345", "退款多久能到账？"]},
+    {"question": "我今晚醉驾被交警查到，血液酒精可能超标，需要律师吗？"},
+    {"question": "家人已经被刑事拘留，明天开庭，目前还没有委托律师"},
+    {"question": "我想离婚，孩子抚养权和财产分割应该怎么处理？"},
+    {"question": "公司拖欠工资，我想申请劳动仲裁，需要准备什么材料？"},
+    {"question": "合同纠纷，对方违约，想起诉需要什么材料？"},
+    {"question": "发生交通事故后责任认定有争议，应该怎么主张赔偿？"},
+    {"question": "朋友民间借贷欠钱不还，我有借条，应该怎么处理？"},
+    {"question": "我已经联系过律师，想预约律师进行正式咨询"},
 ]
