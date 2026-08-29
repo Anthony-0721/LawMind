@@ -34,6 +34,7 @@ from agents.tools import (
     identify_legal_domain,
     reception_tools,
     recommend_lawyer,
+    resolve_legal_domain,
     validate_contact,
 )
 from core.intent_recognizer import UrgencyLevel
@@ -232,16 +233,16 @@ def test_recommend_lawyer_missing_service_returns_fallback():
 
 def test_recommend_lawyer_uses_optional_service():
     class FakeLawyerService:
-        def recommend(self, intent):
-            return [{"id": "lawyer-1", "intent": intent.value}]
+        def recommend(self, legal_domain):
+            return [{"id": "lawyer-1", "legal_domain": legal_domain}]
 
     req = make_request(intent=LawIntent.DANGEROUS_DRIVING)
 
     assert recommend_lawyer(req, {}, FakeLawyerService()) == [
-        {"id": "lawyer-1", "intent": "dangerous_driving"}
+        {"id": "lawyer-1", "legal_domain": "dangerous_driving"}
     ]
     assert escalation_tools(FakeLawyerService())["recommend_lawyer"].handler(req, {}) == [
-        {"id": "lawyer-1", "intent": "dangerous_driving"}
+        {"id": "lawyer-1", "legal_domain": "dangerous_driving"}
     ]
 
 
@@ -507,3 +508,39 @@ def test_pii_is_redacted_recursively_in_nested_lists():
     assert redacted["contact"][0]["nested"][0]["name"] == "***"
     assert redacted["contact"][0]["nested"][0]["phone"] == "***"
     assert redacted["city"] == "上海"
+
+
+def test_legal_domain_args_override_entities_in_resolver_recommend_and_record():
+    req = make_request(
+        intent=LawIntent.CRIMINAL_DEFENSE,
+        entities={"legal_domain": ["criminal_defense"]},
+    )
+
+    class RecordingService:
+        def recommend(self, legal_domain):
+            self.seen = legal_domain
+            return [{"legal_domain": legal_domain}]
+
+    assert resolve_legal_domain(req, {"legal_domain": "civil"}) == "civil"
+
+    service = RecordingService()
+    recommendation = recommend_lawyer(req, {"legal_domain": "civil"}, service)
+    assert service.seen == "civil"
+    assert recommendation == [{"legal_domain": "civil"}]
+
+    draft = create_consultation_record(req, {"legal_domain": "civil"})
+    assert draft["legal_domain"] == "civil"
+
+
+def test_legal_domain_fallback_is_other():
+    req = make_request(intent=LawIntent.CRIMINAL_DEFENSE, entities={})
+
+    assert resolve_legal_domain(req, {}) == "criminal_defense"
+    assert resolve_legal_domain(req, {"legal_domain": "civil"}) == "civil"
+
+    no_intent = Request(
+        message="测试",
+        user_id="test-user",
+        conv_id="test-conv",
+    )
+    assert resolve_legal_domain(no_intent, {}) == "other"

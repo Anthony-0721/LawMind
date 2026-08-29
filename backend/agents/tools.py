@@ -112,18 +112,17 @@ def resolve_legal_domain(
     req: Request,
     args: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Resolve legal domain with entity -> args -> intent precedence."""
-    entity_value = _first_entity(req, "legal_domain", None)
-    if entity_value not in (None, ""):
-        return str(entity_value)
+    """Resolve legal domain with args -> entity -> intent precedence."""
     if args:
         arg_value = args.get("legal_domain")
         if arg_value not in (None, ""):
             return str(arg_value)
-    request_value = getattr(req, "legal_domain", None)
-    if request_value not in (None, ""):
-        return str(request_value)
-    return _intent_value(req)
+    entity_value = _first_entity(req, "legal_domain", None)
+    if entity_value not in (None, ""):
+        return str(entity_value)
+    if req.intent is not None:
+        return req.intent.value
+    return "other"
 
 
 def _legal_domain_value(
@@ -467,13 +466,7 @@ def recommend_lawyer(
             "reason": "lawyer_service_not_configured",
             "lawyers": [],
         }
-    domain = args.get("legal_domain")
-    intent = (
-        domain
-        if domain not in (None, "")
-        else (req.intent if req.intent is not None else args.get("intent"))
-    )
-    return lawyer_service.recommend(intent)
+    return lawyer_service.recommend(resolve_legal_domain(req, args))
 
 
 def _contact_from_args(args: Dict[str, Any]) -> Dict[str, str]:
