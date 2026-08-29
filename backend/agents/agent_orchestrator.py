@@ -34,7 +34,7 @@ from agents.tools import (
     build_shared_law_rag_tools,
     civil_tools,
     criminal_tools,
-    escalation_tools,
+    build_escalation_tools,
     reception_tools,
     resolve_legal_domain,
     validate_contact,
@@ -741,15 +741,20 @@ class EscalationAgent(BaseAgent):
         skill_manager: Optional[Any] = None,
         profile: Optional[AgentProfile] = None,
         lawyer_service: Optional[Any] = None,
+        consultation_service: Optional[Any] = None,
     ):
         super().__init__(client, model, skill_manager, profile)
         self._lawyer_service = lawyer_service
+        self._consultation_service = consultation_service
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
         tools = dict(super().get_tools())
         if "search_law_knowledge" not in tools:
             tools.update(build_shared_law_rag_tools(None))
-        tools.update(escalation_tools(self._lawyer_service))
+        tools.update(build_escalation_tools(
+            self._consultation_service,
+            self._lawyer_service,
+        ))
         return tools
 
     async def handle(self, req: Request) -> AgentResponse:
@@ -927,6 +932,7 @@ class AgentOrchestrator:
         rag_tool_manager: Optional[Any] = None,
         client: Optional[Any] = None,
         lawyer_service: Optional[Any] = None,
+        consultation_service: Optional[Any] = None,
     ):
         if client is None:
             kwargs: Dict[str, Any] = {"api_key": api_key}
@@ -945,7 +951,14 @@ class AgentOrchestrator:
             AgentType.RECEPTION: [self._make_agent(ReceptionAgent, client, model, skill_manager)],
             AgentType.CRIMINAL: [self._make_agent(CriminalDefenseAgent, client, model, skill_manager)],
             AgentType.CIVIL: [self._make_agent(CivilConsultationAgent, client, model, skill_manager)],
-            AgentType.ESCALATION: [self._make_agent(EscalationAgent, client, model, skill_manager, lawyer_service=lawyer_service)],
+            AgentType.ESCALATION: [self._make_agent(
+                EscalationAgent,
+                client,
+                model,
+                skill_manager,
+                lawyer_service=lawyer_service,
+                consultation_service=consultation_service,
+            )],
         }
         self.set_shared_tools(build_shared_law_rag_tools(rag_tool_manager))
 
@@ -956,6 +969,7 @@ class AgentOrchestrator:
         default_model: str,
         skill_manager: Optional[Any],
         lawyer_service: Optional[Any] = None,
+        consultation_service: Optional[Any] = None,
     ) -> BaseAgent:
         """按角色创建 Agent，并允许用环境变量覆盖该角色的模型。
 
@@ -973,6 +987,7 @@ class AgentOrchestrator:
         kwargs: Dict[str, Any] = {"profile": configured_profile}
         if agent_cls is EscalationAgent:
             kwargs["lawyer_service"] = lawyer_service
+            kwargs["consultation_service"] = consultation_service
         return agent_cls(client, default_model, skill_manager, **kwargs)
 
     def set_skill_manager(self, skill_manager: Optional[Any]) -> None:

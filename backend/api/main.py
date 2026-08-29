@@ -49,6 +49,9 @@ _tool_manager = None
 _monitor      = None
 _evaluator    = None
 _skill_manager = None
+_lawyer_service = None
+_consultation_service = None
+_bootstrap_context = None
 
 _LEGACY_ENV_PREFIX = "RETIRED_"
 
@@ -86,7 +89,7 @@ def _anthropic_cfg() -> Dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
+    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager, _lawyer_service, _consultation_service, _bootstrap_context
 
     print(BANNER, flush=True)
 
@@ -116,13 +119,7 @@ async def lifespan(app: FastAPI):
     )
     _skill_manager.load()
 
-    # Agent 编排器
-    _orchestrator = AgentOrchestrator(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        model=cfg["model"],
-        skill_manager=_skill_manager,
-    )
+    # Agent 编排器将在数据库服务初始化后构建。
 
     # 记忆管理器（Redis 工作记忆 + ChromaDB 情景记忆/用户画像）
     _memory = MemoryManager(
@@ -152,13 +149,26 @@ async def lifespan(app: FastAPI):
     from services.bootstrap import bootstrap_law_data
 
     data_root = pathlib.Path(_ROOT) / "data"
-    bootstrap_summary = bootstrap_law_data(
+    bootstrap_context = bootstrap_law_data(
         SessionLocal,
         kb,
         data_root / "law_faq_seed.json",
         data_root / "lawyers_seed.json",
     )
-    logger.info("律所数据初始化完成: %s", bootstrap_summary)
+    logger.info("律所数据初始化完成: %s", bootstrap_context)
+    _lawyer_service = bootstrap_context["lawyer_service"]
+    _consultation_service = bootstrap_context["consultation_service"]
+    _bootstrap_context = bootstrap_context
+
+    # Agent 编排器
+    _orchestrator = AgentOrchestrator(
+        api_key=cfg["api_key"],
+        base_url=cfg.get("base_url"),
+        model=cfg["model"],
+        skill_manager=_skill_manager,
+        lawyer_service=_lawyer_service,
+        consultation_service=_consultation_service,
+    )
 
     def knowledge_fallback(params: Dict[str, Any], context: Optional[Dict[str, Any]], error: str):
         query = params.get("query", "")
@@ -214,6 +224,11 @@ async def lifespan(app: FastAPI):
     yield
 
     await _monitor.stop()
+    if _bootstrap_context is not None:
+        close = getattr(_bootstrap_context.get("session"), "close", None)
+        if callable(close):
+            close()
+        _bootstrap_context = None
     if _memory is not None:
         await _memory.close()
     logger.info("LawMind 已关闭")

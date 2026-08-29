@@ -8,9 +8,12 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
+from db.consultation_repository import ConsultationRepository
 from db.database import init_db
 from db.faq_repository import FaqRepository
 from db.lawyer_repository import LawyerRepository
+from .consultation_service import ConsultationService
+from .lawyer_recommendation import LawyerService
 from .faq_sync_service import FaqSyncService
 
 
@@ -28,10 +31,11 @@ def bootstrap_law_data(
     faq_seed_path: Any,
     lawyer_seed_path: Any,
 ) -> Dict[str, Any]:
-    """Create tables, seed FAQs/lawyers, and reconcile FAQ retrieval vectors.
+    """Create tables, seed FAQs/lawyers, and build the application services.
 
-    Returns a JSON-serializable summary with the number of newly seeded rows
-    and the results returned by ``FaqSyncService.sync_all``.
+    Returns a bootstrap context containing the seeded summary and the live
+    repository/service objects backed by one long-lived session. Callers should
+    close ``context["session"]`` when the application shuts down.
     """
     init_db()
     faq_items = _load_seed(faq_seed_path)
@@ -41,6 +45,7 @@ def bootstrap_law_data(
     try:
         faq_repository = FaqRepository(session)
         lawyer_repository = LawyerRepository(session)
+        consultation_repository = ConsultationRepository(session)
         faq_seeded = faq_repository.seed_faqs(faq_items)
         lawyer_seeded = lawyer_repository.seed_lawyers(lawyer_items)
         try:
@@ -52,10 +57,11 @@ def bootstrap_law_data(
             faq_repository,
             knowledge_base,
         ).sync_all()
-    finally:
+    except Exception:
         close = getattr(session, "close", None)
         if callable(close):
             close()
+        raise
 
     faq_synced = sum(
         1 for result in faq_sync_results if result.get("success") is True
@@ -64,6 +70,12 @@ def bootstrap_law_data(
         1 for result in faq_sync_results if result.get("success") is not True
     )
     return {
+        "session": session,
+        "faq_repository": faq_repository,
+        "lawyer_repository": lawyer_repository,
+        "consultation_repository": consultation_repository,
+        "lawyer_service": LawyerService(lawyer_repository),
+        "consultation_service": ConsultationService(consultation_repository),
         "faq_seeded": faq_seeded,
         "lawyer_seeded": lawyer_seeded,
         "faq_sync_results": faq_sync_results,

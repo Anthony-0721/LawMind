@@ -570,8 +570,28 @@ def create_consultation_record(
     req: Request,
     args: Dict[str, Any],
     lawyer_service: Optional[Any] = None,
+    consultation_service: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """生成咨询记录草稿；数据库持久化由后续 Task 8/9 完成。"""
+    """生成咨询记录；完整且有效时可通过咨询服务持久化。
+
+    未注入咨询服务、信息不完整或未同意时返回确定性的 DRAFT 草稿。
+    """
+    if (
+        consultation_service is None
+        and lawyer_service is not None
+        and hasattr(lawyer_service, "save_from_agent")
+        and not hasattr(lawyer_service, "recommend")
+    ):
+        consultation_service = lawyer_service
+        lawyer_service = None
+    elif (
+        consultation_service is not None
+        and lawyer_service is not None
+        and hasattr(lawyer_service, "save_from_agent")
+        and hasattr(consultation_service, "recommend")
+    ):
+        consultation_service, lawyer_service = lawyer_service, consultation_service
+
     raw_lawyers = args.get("recommended_lawyers") or []
     recommended_lawyers = (
         list(raw_lawyers)
@@ -611,7 +631,7 @@ def create_consultation_record(
         or _first_entity(req, "preferred_time", "")
         or ""
     )
-    return {
+    draft = {
         "request_id": req.request_id,
         "user_id": req.user_id,
         "legal_domain": resolve_legal_domain(req, effective_args),
@@ -630,6 +650,18 @@ def create_consultation_record(
         "version": 1,
         "status": "PENDING" if contact_valid and consent else "DRAFT",
     }
+
+    if consultation_service is not None and draft["status"] == "PENDING":
+        try:
+            return consultation_service.save_from_agent(draft)
+        except Exception:
+            return {
+                **draft,
+                "success": False,
+                "error": "consultation_save_failed",
+                "persisted": False,
+            }
+    return draft
 
 
 def build_handoff_summary(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -653,19 +685,28 @@ def build_handoff_summary(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def escalation_tools(lawyer_service: Optional[Any] = None) -> Dict[str, AgentToolSpec]:
-    """构建升级 Agent 工具；推荐服务可选注入。"""
+def build_escalation_tools(
+    consultation_service: Optional[Any] = None,
+    lawyer_service: Optional[Any] = None,
+) -> Dict[str, AgentToolSpec]:
+    """构建升级 Agent 工具；咨询/律师服务均为可选注入。
+
+    未配置时保持确定性的草稿/降级契约；配置后完整留资会持久化。
+    """
 
     if lawyer_service is None:
         recommend_handler = recommend_lawyer
-        create_handler = create_consultation_record
     else:
         def recommend_handler(req: Request, args: Dict[str, Any]) -> Any:
             return recommend_lawyer(req, args, lawyer_service)
 
-        def create_handler(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
-            return create_consultation_record(req, args, lawyer_service)
-
+    def create_handler(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
+        return create_consultation_record(
+            req,
+            args,
+            lawyer_service,
+            consultation_service,
+        )
     return {
         "recommend_lawyer": make_tool(
             "recommend_lawyer",
@@ -685,7 +726,7 @@ def escalation_tools(lawyer_service: Optional[Any] = None) -> Dict[str, AgentToo
         ),
         "create_consultation_record": make_tool(
             "create_consultation_record",
-            "生成咨询记录草稿；未满足留资条件时状态为 DRAFT，不直接写数据库。",
+            "生成咨询记录；完整且有效时通过咨询服务持久化，否则返回 DRAFT 草稿。",
             {
                 "recommended_lawyers": {
                     "type": "array",
@@ -714,3 +755,26 @@ def escalation_tools(lawyer_service: Optional[Any] = None) -> Dict[str, AgentToo
             build_handoff_summary,
         ),
     }
+
+
+def escalation_tools(
+    lawyer_service: Optional[Any] = None,
+    consultation_service: Optional[Any] = None,
+) -> Dict[str, AgentToolSpec]:
+    """Backward-compatible alias accepting the legacy lawyer-first ordering."""
+    if (
+        consultation_service is None
+        and lawyer_service is not None
+        and hasattr(lawyer_service, "save_from_agent")
+        and not hasattr(lawyer_service, "recommend")
+    ):
+        consultation_service = lawyer_service
+        lawyer_service = None
+    elif (
+        consultation_service is not None
+        and lawyer_service is not None
+        and hasattr(consultation_service, "recommend")
+        and hasattr(lawyer_service, "save_from_agent")
+    ):
+        lawyer_service, consultation_service = consultation_service, lawyer_service
+    return build_escalation_tools(consultation_service, lawyer_service)
