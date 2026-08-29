@@ -617,7 +617,7 @@ class LawIntentRecognizer:
         if (
             has_unnegated_keyword(message, "紧急")
             or has_unnegated_keyword(message, "非常着急")
-        ):
+        ) and "不紧急" not in message:
             return UrgencyLevel.CRITICAL
         if LawRiskFlag.DETENTION in risk_flags:
             return UrgencyLevel.CRITICAL

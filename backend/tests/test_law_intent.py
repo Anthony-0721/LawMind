@@ -340,3 +340,62 @@ def test_positive_events_are_not_suppressed_by_generic_markers(message, risk_fla
     result = make_law_recognizer().recognize_sync(message)
 
     assert risk_flag in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "不构成交通事故",
+        "不是交通事故",
+        "不属于交通事故",
+        "没有构成交通事故",
+        "没有造成交通事故",
+    ],
+)
+def test_fifth_review_event_negations_suppress_traffic(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT not in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "发生交通事故后还没请律师",
+        "没请律师发生交通事故",
+        "没有律师发生交通事故",
+    ],
+)
+def test_fifth_review_no_lawyer_phrases_do_not_suppress_traffic(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT in result.risk_flags
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "追尾了",
+        "肇事逃逸",
+    ],
+)
+def test_fifth_review_readds_traffic_specific_terms(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "并不是未委托律师",
+        "不是未委托律师",
+        "并未没有律师",
+        "并没有没有律师",
+    ],
+)
+def test_fifth_review_extra_no_lawyer_double_negations(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.NO_LAWYER not in result.risk_flags

@@ -115,8 +115,11 @@ LAW_TEMPLATES: Dict[LawIntent, List[str]] = {
         "车祸",
         "交通肇事",
         "撞车",
+        "追尾",
+        "追尾事故",
         "车辆相撞",
         "行人受伤",
+        "肇事逃逸",
     ],
     LawIntent.CIVIL_LOAN: [
         "民间借贷",
@@ -198,8 +201,11 @@ LAW_PATTERNS: Dict[LawIntent, List[str]] = {
         "车祸",
         "交通肇事",
         "撞车",
+        "追尾",
+        "追尾事故",
         "车辆相撞",
         "行人受伤",
+        "肇事逃逸",
     ],
     LawIntent.CIVIL_LOAN: [
         "民间借贷",
@@ -245,6 +251,23 @@ LAW_PATTERN_PRIORITY: List[LawIntent] = [
     LawIntent.OTHER,
 ]
 
+NO_LAWYER_PHRASES: tuple[str, ...] = (
+    "没有律师",
+    "没有请律师",
+    "还没有律师",
+    "还没有委托律师",
+    "还没请律师",
+    "没请律师",
+    "没有聘请律师",
+    "未委托律师",
+    "尚未委托律师",
+    "没有代理人",
+    "没请",
+    "未请",
+    "未委托",
+)
+
+
 LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
     LawRiskFlag.DETENTION: [
         "刑事拘留",
@@ -276,8 +299,11 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
         "车祸",
         "交通肇事",
         "撞车",
+        "追尾",
+        "追尾事故",
         "车辆相撞",
         "行人受伤",
+        "肇事逃逸",
     ],
     LawRiskFlag.FILED: [
         "立案",
@@ -290,52 +316,43 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
         "提起公诉",
         "检察院起诉",
     ],
-    LawRiskFlag.NO_LAWYER: [
-        "没有律师",
-        "没有请律师",
-        "还没有律师",
-        "还没有委托律师",
-        "还没请律师",
-        "没请律师",
-        "没有聘请律师",
-        "未委托律师",
-        "尚未委托律师",
-        "没有代理人",
-    ],
+    LawRiskFlag.NO_LAWYER: list(NO_LAWYER_PHRASES),
 }
 
 
-_NEGATION_PHRASES = (
-    "未受伤",
+EVENT_NEGATION_PHRASES = (
+    "没有发生",
     "未发生",
     "未构成",
     "未造成",
     "未发现",
+    "没有构成",
+    "没有造成",
+    "不构成",
+    "不是",
+    "不属于",
+    "并非",
+    "并不是",
+    "并不",
+    "不涉及",
+    "未受伤",
     "未立案",
     "尚未",
     "未被",
     "无事故",
     "无交通事故",
-    "没有发生",
-    "没有交通事故",
-    "没有律师",
-    "没有请",
-    "未请",
-    "未委托",
-    "没请",
-    "没发生",
-    # Explicit compatibility phrases for previously required short cases.
+    # Explicit compatibility event phrases from earlier reviews.
     "没有被",
     "没有受伤",
     "没有立案",
-    "不紧急",
+    "没有交通事故",
 )
-_NEGATION_SCOPE_RE = re.compile("|".join(re.escape(p) for p in _NEGATION_PHRASES))
+_NEGATION_SCOPE_RE = re.compile("|".join(re.escape(p) for p in EVENT_NEGATION_PHRASES))
 _SCOPE_BREAK_RE = re.compile(
     r"但是|不过|然而|但|而|[。！？；，,;!？]"
 )
 _DOUBLE_NEGATION_NO_LAWYER_RE = re.compile(
-    r"(?:并不是没有|不是没有|并非没有|并不是没请|不是没请|并非未委托)"
+    r"(?:并不是未委托|不是未委托|并未没有|并没有没有|并不是没有|不是没有|并非没有|并不是没请|不是没请|并非未委托)"
     r"(?:律师|请律师|委托律师|代理人|聘请律师|代理)"
 )
 _POSITIVE_LAWYER_RE = re.compile(
@@ -394,7 +411,7 @@ def has_no_lawyer_risk(text: str) -> bool:
     for clause in clauses:
         if _DOUBLE_NEGATION_NO_LAWYER_RE.search(clause):
             continue
-        if any(keyword in clause for keyword in LAW_RISK_RULES[LawRiskFlag.NO_LAWYER]):
+        if any(keyword in clause for keyword in NO_LAWYER_PHRASES):
             return True
     return False
 
