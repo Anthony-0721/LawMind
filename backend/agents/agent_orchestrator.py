@@ -29,7 +29,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from anthropic import AsyncAnthropic
 
-from agents.tools import AgentToolSpec, build_shared_rag_tools
+from agents.tools import (
+    AgentToolSpec,
+    build_shared_law_rag_tools,
+    civil_tools,
+    criminal_tools,
+    escalation_tools,
+    reception_tools,
+)
 from core.intent_recognizer import LawIntentRecognizer, UrgencyLevel
 from core.law_domain import LawIntent, LawRiskFlag
 from core.llm_utils import extract_text_content
@@ -425,8 +432,11 @@ class ReceptionAgent(BaseAgent):
     )
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
-        # Task 4 will add law tools; keep import-safe until then.
-        return super().get_tools()
+        tools = dict(super().get_tools())
+        if "search_law_knowledge" not in tools:
+            tools.update(build_shared_law_rag_tools(None))
+        tools.update(reception_tools())
+        return tools
 
 
 class CriminalDefenseAgent(BaseAgent):
@@ -478,8 +488,11 @@ class CriminalDefenseAgent(BaseAgent):
     )
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
-        # Task 4 will add law tools; keep import-safe until then.
-        return super().get_tools()
+        tools = dict(super().get_tools())
+        if "search_law_knowledge" not in tools:
+            tools.update(build_shared_law_rag_tools(None))
+        tools.update(criminal_tools())
+        return tools
 
 
 class CivilConsultationAgent(BaseAgent):
@@ -529,15 +542,18 @@ class CivilConsultationAgent(BaseAgent):
     )
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
-        # Task 4 will add law tools; keep import-safe until then.
-        return super().get_tools()
+        tools = dict(super().get_tools())
+        if "search_law_knowledge" not in tools:
+            tools.update(build_shared_law_rag_tools(None))
+        tools.update(civil_tools())
+        return tools
 
 
 class EscalationAgent(BaseAgent):
     """人工升级与留资交接节点。
 
     该节点不调用 LLM：它生成确定性的转人工回复并标记 escalate=True。
-    Task 4 会在 get_tools() 中接入推荐律师、校验联系方式、保存咨询记录等工具。
+    get_tools() 已接入推荐律师、校验联系方式、咨询记录草稿和交接摘要工具。
     """
 
     agent_type = AgentType.ESCALATION
@@ -564,8 +580,11 @@ class EscalationAgent(BaseAgent):
     )
 
     def get_tools(self) -> Dict[str, AgentToolSpec]:
-        # Task 4 will add law tools; keep import-safe until then.
-        return super().get_tools()
+        tools = dict(super().get_tools())
+        if "search_law_knowledge" not in tools:
+            tools.update(build_shared_law_rag_tools(None))
+        tools.update(escalation_tools())
+        return tools
 
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
@@ -685,7 +704,7 @@ class AgentOrchestrator:
             AgentType.CIVIL: [self._make_agent(CivilConsultationAgent, client, model, skill_manager)],
             AgentType.ESCALATION: [self._make_agent(EscalationAgent, client, model, skill_manager)],
         }
-        self.set_shared_tools(build_shared_rag_tools(rag_tool_manager))
+        self.set_shared_tools(build_shared_law_rag_tools(rag_tool_manager))
 
     @staticmethod
     def _make_agent(

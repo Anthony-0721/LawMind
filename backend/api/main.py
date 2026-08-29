@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
 
     print(BANNER, flush=True)
 
-    from agents.agent_orchestrator import AgentOrchestrator, Request, build_shared_rag_tools
+    from agents.agent_orchestrator import AgentOrchestrator, Request, build_shared_law_rag_tools
     from core.intent_recognizer import LawIntentRecognizer
     from evaluation.evaluator import EndToEndEvaluator
     from mcp.knowledge_base import KnowledgeBase
@@ -155,7 +155,7 @@ async def lifespan(app: FastAPI):
         fallback=knowledge_fallback,
     ))
     if _orchestrator is not None:
-        _orchestrator.set_shared_tools(build_shared_rag_tools(_tool_manager))
+        _orchestrator.set_shared_tools(build_shared_law_rag_tools(_tool_manager))
 
     # 性能监控（可选启动 Prometheus）
     prom_port = int(os.getenv("PROMETHEUS_PORT", "0")) or None
@@ -333,7 +333,7 @@ async def chat(req: ChatRequest):
         routing_confidence=result.routing_confidence,
         escalated=result.escalated,
         latency_ms=round(result.latency_ms, 1),
-        knowledge_used="search_knowledge_base" in result.tools_used,
+        knowledge_used="search_law_knowledge" in result.tools_used,
         entities=intent_result.entities,
         intent_confidence=round(intent_result.confidence, 4),
         intent_source_scores=intent_result.source_scores,
