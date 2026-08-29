@@ -63,6 +63,7 @@ class FakeKnowledgeBase:
         self.documents: Dict[str, Dict[str, Any]] = {}
         self.delete_calls: List[Dict[str, Any]] = []
         self.add_calls: List[Dict[str, Any]] = []
+        self.faq_vector_delete_calls: List[int] = []
         self.fail_add = fail_add
         self.fail_delete = fail_delete
 
@@ -76,6 +77,16 @@ class FakeKnowledgeBase:
         before = len(self.documents)
         for doc_id in list(self.documents):
             if self.documents[doc_id]["metadata"].get("faq_id") == faq_id:
+                del self.documents[doc_id]
+        return before - len(self.documents)
+
+    def delete_faq_vectors(self) -> int:
+        self.faq_vector_delete_calls.append(1)
+        if self.fail_delete:
+            raise RuntimeError("faq vector cleanup failed")
+        before = len(self.documents)
+        for doc_id in list(self.documents):
+            if self.documents[doc_id]["metadata"].get("doc_type") == "faq":
                 del self.documents[doc_id]
         return before - len(self.documents)
 
@@ -610,6 +621,14 @@ def test_bootstrap_seeds_and_syncs(monkeypatch):
 
     monkeypatch.setattr(bootstrap_module, "init_db", lambda: None)
     kb = FakeKnowledgeBase()
+    kb.documents["legacy-faq"] = {
+        "content": "旧 FAQ",
+        "metadata": {"doc_type": "faq", "faq_id": "legacy"},
+    }
+    kb.documents["domain-brief"] = {
+        "content": "领域摘要",
+        "metadata": {"doc_type": "domain_brief"},
+    }
 
     summary = bootstrap_module.bootstrap_law_data(
         Session,
@@ -622,8 +641,11 @@ def test_bootstrap_seeds_and_syncs(monkeypatch):
     assert summary["lawyer_seeded"] == 1
     assert summary["faq_synced"] == 1
     assert summary["faq_failed"] == 0
-    assert len(kb.documents) == 1
-    assert next(iter(kb.documents)).startswith("faq:")
+    assert "legacy-faq" not in kb.documents
+    assert "domain-brief" in kb.documents
+    assert kb.faq_vector_delete_calls == [1]
+    assert len(kb.documents) == 2
+    assert any(key.startswith("faq:") for key in kb.documents)
 
     second = bootstrap_module.bootstrap_law_data(
         Session,
@@ -634,6 +656,92 @@ def test_bootstrap_seeds_and_syncs(monkeypatch):
     assert second["faq_seeded"] == 0
     assert second["lawyer_seeded"] == 0
     assert second["faq_synced"] == 1
+
+
+def test_invalid_faq_payload_is_rejected_before_repo_write():
+    repo = FakeFaqRepository()
+    kb = FakeKnowledgeBase()
+    service = FaqSyncService(repo, kb)
+
+    invalid_payloads = [
+        {"category": "criminal", "question": "   ", "answer": "答案"},
+        {"category": "criminal", "question": "问题", "answer": ""},
+        {"category": "invalid_category", "question": "问题", "answer": "答案"},
+    ]
+    for payload in invalid_payloads:
+        result = service.create_record(payload)
+        assert result == {"success": False, "error": "invalid_faq_payload"}
+        assert repo.records == []
+        assert repo.create_calls == []
+
+    existing = FakeFaqRepository([make_faq()])
+    kb2 = FakeKnowledgeBase()
+    service2 = FaqSyncService(existing, kb2)
+    invalid_result = service2.update_record("faq-1", {"answer": "   "})
+    assert invalid_result == {
+        "success": False,
+        "faq_id": "faq-1",
+        "error": "invalid_faq_payload",
+    }
+    assert existing.update_calls == []
+
+
+def test_delete_record_is_retry_safe_when_db_row_is_already_missing():
+    repo = FakeFaqRepository()
+    kb = FakeKnowledgeBase()
+    kb.documents["faq:missing"] = {
+        "content": "遗留向量",
+        "metadata": {"faq_id": "missing"},
+    }
+    service = FaqSyncService(repo, kb)
+
+    result = service.delete_record("missing")
+
+    assert result == {"success": True, "faq_id": "missing", "action": "delete"}
+    assert repo.delete_calls == ["missing"]
+    assert kb.documents == {}
+
+
+def test_delete_record_fails_only_when_chroma_cleanup_fails():
+    repo = FakeFaqRepository()
+    kb = FakeKnowledgeBase(fail_delete=True)
+    service = FaqSyncService(repo, kb)
+
+    result = service.delete_record("missing")
+
+    assert result == {"success": False, "error": "faq_sync_delete_failed"}
+    assert repo.delete_calls == ["missing"]
+
+
+def test_strict_version_rejects_float_string_and_boolean_versions():
+    repo = FakeFaqRepository()
+    kb = FakeKnowledgeBase()
+    service = FaqSyncService(repo, kb)
+
+    for invalid_version in (1.5, "1", True, False):
+        result = service.create_record({
+            "category": "criminal",
+            "question": "问题",
+            "answer": "答案",
+            "version": invalid_version,
+        })
+        assert result == {"success": False, "error": "invalid_faq_payload"}
+        assert repo.records == []
+
+    invalid_sync = make_faq(version=1.5)
+    result = service.sync(invalid_sync)
+    assert result["success"] is False
+    assert kb.delete_calls == []
+    assert kb.add_calls == []
+
+
+def test_pii_redacts_plus86_masked_phone():
+    sanitized = _sanitize_error(RuntimeError("张三+86138****1234"), {})
+
+    assert "**" in sanitized
+    assert "张三" not in sanitized
+    assert "+86" not in sanitized
+    assert "138****1234" not in sanitized
 
 
 def test_knowledge_base_add_documents_supports_stable_id_and_metadata():
@@ -664,6 +772,17 @@ def test_knowledge_base_add_documents_supports_stable_id_and_metadata():
     assert collection.metadatas[0]["category"] == "criminal"
     assert collection.metadatas[0]["version"] == 1
     assert collection.metadatas[0]["source"] == "law_firm"
+
+
+def test_knowledge_base_delete_faq_vectors_only_removes_faq_docs():
+    kb_instance = KnowledgeBase.__new__(KnowledgeBase)
+    collection = FakeCollection()
+    kb_instance._collection = collection
+
+    deleted = kb_instance.delete_faq_vectors()
+
+    assert deleted == 1
+    assert collection.deleted == {"doc_type": "faq"}
 
 
 def test_knowledge_base_delete_by_metadata_and_search_metadata():

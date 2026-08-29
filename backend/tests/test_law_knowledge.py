@@ -328,6 +328,7 @@ class FakeCollection:
         self.added_metadatas = []
         self.added_ids = []
         self.count_value = count
+        self.deleted_where = None
 
     def count(self):
         return self.count_value
@@ -337,6 +338,10 @@ class FakeCollection:
         self.added_documents.extend(documents)
         self.added_metadatas.extend(metadatas)
         self.count_value += len(ids)
+
+    def delete(self, where=None, ids=None):
+        self.deleted_where = where
+        return 1
 
     def query(self, query_texts, n_results):
         content = (
@@ -403,6 +408,16 @@ def test_knowledge_base_uses_law_collection_and_loads_only_law_docs():
     assert all(meta.get("category") for meta in kb._collection.added_metadatas)
     assert any(meta.get("doc_type") == "domain_brief" for meta in kb._collection.added_metadatas)
     assert any(meta.get("category") == "dangerous_driving" for meta in kb._collection.added_metadatas)
+
+
+def test_knowledge_base_delete_faq_vectors_only_removes_faq_docs():
+    kb_module = _load_knowledge_base_module()
+    kb = kb_module.KnowledgeBase.__new__(kb_module.KnowledgeBase)
+    collection = FakeCollection()
+    kb._collection = collection
+
+    assert kb.delete_faq_vectors() == 1
+    assert collection.deleted_where == {"doc_type": "faq"}
 
 
 def test_knowledge_base_default_docs_exclude_seed_faqs():

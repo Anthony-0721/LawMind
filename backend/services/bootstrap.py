@@ -40,6 +40,7 @@ def bootstrap_law_data(
         lawyer_repository = LawyerRepository(session)
         faq_seeded = faq_repository.seed_faqs(faq_items)
         lawyer_seeded = lawyer_repository.seed_lawyers(lawyer_items)
+        knowledge_base.delete_faq_vectors()
         faq_sync_results = FaqSyncService(
             faq_repository,
             knowledge_base,

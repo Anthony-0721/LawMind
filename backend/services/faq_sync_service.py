@@ -15,7 +15,7 @@ _ID_CARD_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 _PHONE_RE = re.compile(
     r"(?<!\d)(?:\+86[\s\-]*1[3-9](?:[\s\-]*\d){9}|1[3-9](?:[\s\-]*\d){9})(?!\d)"
 )
-_MASKED_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{1}\*{2,4}\d{4}(?!\d)")
+_MASKED_PHONE_RE = re.compile(r"(?<!\d)(?:\+86[\s\-]*1[3-9]\d{1}\*{2,4}\d{4}|1[3-9]\d{1}\*{2,4}\d{4})(?!\d)")
 _LANDLINE_PHONE_RE = re.compile(
     r"(?<!\d)0\d{2,3}[\s\-]?\d{7,8}(?:\s*[-—]?\s*\d{1,6})?(?!\d)"
 )
@@ -25,6 +25,18 @@ _NAME_AFTER_INDICATOR_RE = re.compile(
 _NAME_BEFORE_PLACEHOLDER_RE = re.compile(
     r"[\u4e00-\u9fff]{2,4}(?=[\s]*<(?:phone|email|id)>)"
 )
+
+_VALID_FAQ_CATEGORIES = frozenset({
+    "dangerous_driving",
+    "criminal",
+    "criminal_defense",
+    "labor_dispute",
+    "marriage_family",
+    "contract_dispute",
+    "traffic_accident",
+    "civil_loan",
+    "service",
+})
 
 
 def _record_value(record: Any, key: str, default: Any = None) -> Any:
@@ -56,17 +68,15 @@ def _record_version(record: Any) -> int:
     raw = _record_value(record, "version", None)
     if raw is None:
         raise _FaqValidationError("faq record version is required", cleanup=False)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
+    if isinstance(raw, bool) or not isinstance(raw, int):
         raise _FaqValidationError(
-            "faq version must be an integer", cleanup=False
-        ) from exc
-    if value <= 0:
+            "faq version must be a strict positive integer", cleanup=False
+        )
+    if raw <= 0:
         raise _FaqValidationError(
             "faq version must be a positive integer", cleanup=False
         )
-    return value
+    return raw
 
 
 def _record_version_safe(record: Any) -> int:
@@ -161,6 +171,36 @@ def _apply_record_state(record: Any, **updates: Any) -> None:
             setattr(record, key, value)
     except (AttributeError, TypeError):
         pass
+
+
+def _validate_crud_payload(payload: Any, current: Optional[Mapping[str, Any]] = None) -> bool:
+    """Validate a FAQ write payload before mutating the repository."""
+    if not isinstance(payload, Mapping):
+        return False
+    data = dict(payload)
+    merged = dict(current or {})
+    merged.update(data)
+    question = str(merged.get("question") or "").strip()
+    answer = str(merged.get("answer") or "").strip()
+    category = str(merged.get("category") or "").strip()
+    if not question or not answer:
+        return False
+    if category not in _VALID_FAQ_CATEGORIES:
+        return False
+    if "version" in data and current is not None:
+        if not isinstance(data["version"], int) or isinstance(data["version"], bool) or data["version"] <= 0:
+            return False
+    elif current is not None:
+        try:
+            _record_version(merged)
+        except _FaqValidationError:
+            return False
+    elif "version" in data:
+        try:
+            _record_version(data)
+        except _FaqValidationError:
+            return False
+    return True
 
 
 class FaqSyncService:
@@ -388,7 +428,9 @@ class FaqSyncService:
         }
 
     def create_record(self, payload: Any) -> Dict[str, Any]:
-        """Create a FAQ through the repository and synchronize it."""
+        """Validate, create a FAQ through the repository, and synchronize it."""
+        if not _validate_crud_payload(payload):
+            return {"success": False, "error": "invalid_faq_payload"}
         try:
             record = self.faq_repository.create(payload)
         except Exception as exc:
@@ -399,7 +441,13 @@ class FaqSyncService:
         return self.sync(record)
 
     def update_record(self, faq_id: Any, payload: Any) -> Dict[str, Any]:
-        """Update a FAQ through the repository and synchronize it."""
+        """Validate, update a FAQ through the repository, and synchronize it."""
+        getter = getattr(self.faq_repository, "get_by_id", None)
+        current = getter(str(faq_id)) if getter is not None else None
+        if current is not None and not _validate_crud_payload(payload, current):
+            return {"success": False, "faq_id": str(faq_id), "error": "invalid_faq_payload"}
+        if current is None:
+            return {"success": False, "faq_id": str(faq_id), "error": "faq_update_failed"}
         try:
             record = self.faq_repository.update(str(faq_id), payload)
         except Exception as exc:
@@ -423,14 +471,14 @@ class FaqSyncService:
         return self.sync(record)
 
     def delete_record(self, faq_id: Any) -> Dict[str, Any]:
-        """Delete the DB record first, then remove every retrieval vector."""
+        """Best-effort DB delete, then always remove every retrieval vector."""
         normalized_id = str(faq_id or "").strip()
         try:
-            deleted = self.faq_repository.delete(normalized_id)
+            self.faq_repository.delete(normalized_id)
         except Exception:
-            return {"success": False, "faq_id": normalized_id, "error": "faq_delete_failed"}
-        if deleted is False:
-            return {"success": False, "faq_id": normalized_id, "error": "faq_delete_failed"}
+            # Chroma cleanup is still attempted even when the row is missing or
+            # the repository delete failed.
+            pass
         return self.sync_delete(normalized_id)
 
     def _inactive_failure(self, faq_record: Any, faq_id: str, version: int) -> Dict[str, Any]:

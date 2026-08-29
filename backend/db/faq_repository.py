@@ -140,10 +140,11 @@ class FaqRepository:
             return None
         try:
             current_version = int(record.version or 1)
-            target_version = int(version)
         except (TypeError, ValueError):
             return None
-        if current_version != target_version:
+        if isinstance(version, bool) or not isinstance(version, int):
+            return None
+        if current_version != version:
             return None
         record.sync_status = "synced"
         record.sync_error = None

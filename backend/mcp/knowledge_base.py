@@ -198,6 +198,10 @@ class KnowledgeBase:
         except (TypeError, ValueError):
             return 0
 
+    def delete_faq_vectors(self) -> int:
+        """Delete legacy/orphan vectors created by the old FAQ seed loader."""
+        return self.delete_by_metadata({"doc_type": "faq"})
+
     def add_documents(
         self,
         documents: List[Dict[str, Any]],
