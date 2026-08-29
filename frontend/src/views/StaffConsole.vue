@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   createFaq,
@@ -8,8 +8,6 @@ import {
   deleteFaq,
   getAdminMetrics,
   getConsultation,
-  getSkills,
-  getTraceTools,
   listConsultations,
   listFaqs,
   listLawyers,
@@ -71,7 +69,6 @@ const faqForm = reactive({
 })
 
 const metrics = ref(null)
-const optionalDebug = reactive({ skills: null, trace: null })
 const debugBusy = ref(false)
 const debugError = ref('')
 const reloadResult = ref(null)
@@ -94,12 +91,6 @@ const domainLabels = {
   law_firm_service: '律所服务 / 收费 / 流程',
   other: '其他',
 }
-
-const debugSummary = computed(() => ({
-  metrics: metrics.value,
-  skills: optionalDebug.skills,
-  traceTools: optionalDebug.trace,
-}))
 
 function errorMessage(error) {
   return error?.detail || error?.message || '请求失败'
@@ -142,12 +133,30 @@ async function login() {
 function logout() {
   authenticated.value = false
   password.value = ''
+  loginBusy.value = false
+  loginError.value = ''
+  activeTab.value = 'consultations'
+
   records.value = []
+  recordsBusy.value = false
+  recordsError.value = ''
   selectedRecord.value = null
+  detailStatus.value = ''
+
   lawyers.value = []
+  lawyersBusy.value = false
+  lawyersError.value = ''
+  resetLawyerForm()
+
   faqs.value = []
+  faqsBusy.value = false
+  faqsError.value = ''
+  resetFaqForm()
+
   metrics.value = null
+  debugBusy.value = false
   debugError.value = ''
+  reloadResult.value = null
 }
 
 async function loadConsultations() {
@@ -354,22 +363,9 @@ async function loadDebug() {
   } catch (error) {
     metrics.value = null
     debugError.value = `后端状态读取失败：${errorMessage(error)}`
+  } finally {
+    debugBusy.value = false
   }
-
-  try {
-    const skills = await getSkills(password.value)
-    optionalDebug.skills = typeof skills === 'string' ? { available: false, message: '未配置运行时调试代理' } : { available: true, data: skills }
-  } catch (error) {
-    optionalDebug.skills = { available: false, message: errorMessage(error) }
-  }
-
-  try {
-    const trace = await getTraceTools(password.value)
-    optionalDebug.trace = typeof trace === 'string' ? { available: false, message: '未配置运行时调试代理' } : { available: true, data: trace }
-  } catch (error) {
-    optionalDebug.trace = { available: false, message: errorMessage(error) }
-  }
-  debugBusy.value = false
 }
 
 async function runKnowledgeReload() {
@@ -599,7 +595,7 @@ async function runKnowledgeReload() {
               <button type="button" :disabled="debugBusy" @click="runKnowledgeReload">同步知识库</button>
             </div>
           </div>
-          <p class="muted">管理端可读取咨询、律师、FAQ 统计；原版 /skills 与 /trace/tools 仅在部署实际暴露时可用。</p>
+          <p class="muted">管理端仅读取受保护的 /law/admin/metrics 与 /law/admin/knowledge/reload。</p>
           <p v-if="debugError" class="form-error" role="alert">{{ debugError }}</p>
 
           <div v-if="metrics" class="metrics-grid">
@@ -612,13 +608,9 @@ async function runKnowledgeReload() {
           <div v-if="reloadResult" class="reload-result">
             <strong>同步结果：{{ reloadResult.success ? '成功' : '失败' }}</strong>
             <span v-if="reloadResult.synced !== undefined">同步 {{ reloadResult.synced }} 条，失败 {{ reloadResult.failed }} 条</span>
-            <pre>{{ JSON.stringify(reloadResult, null, 2) }}</pre>
+            <span v-else-if="reloadResult.error">{{ reloadResult.error }}</span>
           </div>
 
-          <div class="debug-card">
-            <h3>调试数据</h3>
-            <pre>{{ JSON.stringify(debugSummary, null, 2) }}</pre>
-          </div>
         </section>
       </section>
     </main>
@@ -1023,27 +1015,6 @@ label span {
 }
 .metric-card strong {
   font-size: 28px;
-}
-.debug-card {
-  padding: 18px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--panel);
-}
-.debug-card h3 {
-  margin: 0 0 12px;
-}
-pre {
-  max-height: 480px;
-  overflow: auto;
-  margin: 0;
-  padding: 14px;
-  border-radius: 10px;
-  background: #0b0c0f;
-  color: #d9ddeb;
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
 }
 .reload-result {
   padding: 14px;

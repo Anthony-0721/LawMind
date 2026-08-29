@@ -76,34 +76,6 @@ async function requestJson(path, options = {}) {
   }
 }
 
-async function requestRootJson(path, options = {}) {
-  const {
-    method = 'GET',
-    body,
-    headers,
-    ...rest
-  } = options
-  const finalHeaders = new Headers(headers || {})
-  const hasBody = body !== undefined
-  if (hasBody && !finalHeaders.has('Content-Type')) {
-    finalHeaders.set('Content-Type', 'application/json')
-  }
-  const response = await fetch(path, {
-    ...rest,
-    method,
-    headers: finalHeaders,
-    body: hasBody ? JSON.stringify(body) : undefined,
-  })
-  if (!response.ok) throw await parseError(response)
-  const text = await response.text()
-  if (!text) return null
-  try {
-    return JSON.parse(text)
-  } catch {
-    return text
-  }
-}
-
 function withToken(sessionToken = '') {
   return { headers: authHeaders(sessionToken) }
 }
@@ -256,14 +228,4 @@ export function reloadKnowledge(password = '') {
 
 export function getAdminMetrics(password = '') {
   return requestJson('/admin/metrics', withAdmin(password))
-}
-
-// The legacy debug endpoints are intentionally optional. They only work when
-// the deployment exposes the original runtime endpoints on the frontend origin.
-export function getSkills(password = '') {
-  return requestRootJson('/skills', withAdmin(password))
-}
-
-export function getTraceTools(password = '') {
-  return requestRootJson('/trace/tools', withAdmin(password))
 }

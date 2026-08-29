@@ -50,7 +50,7 @@ X-Admin-Password: <管理员密码>
 - `POST /law/admin/knowledge/reload`
 - `GET /law/admin/metrics`
 
-调试页还会尝试读取原版运行时端点 `/skills` 和 `/trace/tools`；若部署环境未暴露这些端点，页面会显示后端统计与不可用提示。
+调试页只调用受保护的 `/law/admin/metrics` 和 `/law/admin/knowledge/reload`，不调用原版 `/skills`、`/trace/tools`、`/monitor` 等未加律所管理权限的端点。
 
 ## 本地开发
 

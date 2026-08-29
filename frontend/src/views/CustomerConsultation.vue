@@ -26,6 +26,7 @@ const caseStage = ref('')
 const missingFacts = ref([])
 const riskFlags = ref([])
 const recommendedLawyers = ref([])
+const lawyerRecommendationReady = ref(false)
 const consultationId = ref('')
 const contactBusy = ref(false)
 const contactError = ref('')
@@ -56,16 +57,12 @@ const riskLabels = {
   no_lawyer: '无律师代理',
 }
 
-function errorMessage(error) {
-  return error?.detail || error?.message || '请求失败，请稍后重试'
-}
-
 async function loadOptions() {
   try {
     options.value = await getOptions()
     serviceNotice.value = ''
   } catch (error) {
-    serviceNotice.value = `法律咨询服务暂时不可用：${errorMessage(error)}`
+    serviceNotice.value = '法律咨询服务暂时不可用，请稍后重试。'
   }
 }
 
@@ -88,12 +85,13 @@ async function sendChat(messageText = draft.value) {
     missingFacts.value = data.missing_facts || []
     riskFlags.value = data.risk_flags || []
     recommendedLawyers.value = data.recommended_lawyers || []
+    lawyerRecommendationReady.value = true
     messages.value.push({
       role: 'assistant',
       content: data.response || '我已收到您的问题。当前服务暂时无法生成完整分析，请稍后重试。',
     })
   } catch (error) {
-    serviceNotice.value = `法律咨询服务暂时不可用：${errorMessage(error)}`
+    serviceNotice.value = '法律咨询服务暂时不可用，请稍后重试。'
     messages.value.push({
       role: 'assistant',
       content: '抱歉，咨询服务暂时不可用。您可以稍后重试，或直接留下联系方式让我们为您转人工处理。',
@@ -103,6 +101,13 @@ async function sendChat(messageText = draft.value) {
     await nextTick()
     chatList.value?.scrollTo({ top: chatList.value.scrollHeight, behavior: 'smooth' })
   }
+}
+
+function handleChatKeydown(event) {
+  if (event.key !== 'Enter' || event.isComposing) return
+  if (event.shiftKey) return
+  event.preventDefault()
+  sendChat()
 }
 
 function useTag(label) {
@@ -151,7 +156,7 @@ async function submitConsultation() {
     }
     consultationId.value = data.consultation_id || consultationId.value
   } catch (error) {
-    contactError.value = `提交失败：${errorMessage(error)}`
+    contactError.value = '提交失败，请稍后重试。'
   } finally {
     contactBusy.value = false
   }
@@ -170,7 +175,7 @@ async function submitTransfer() {
     }
     consultationId.value = data.consultation_id || consultationId.value
   } catch (error) {
-    contactError.value = `转人工失败：${errorMessage(error)}`
+    contactError.value = '转人工失败，请稍后重试。'
   } finally {
     contactBusy.value = false
   }
@@ -263,8 +268,9 @@ onMounted(async () => {
             <textarea
               v-model="draft"
               rows="3"
+              aria-label="输入法律咨询问题"
               placeholder="例如：我老公因为醉驾被带走，现在该怎么办？"
-              @keydown.enter.exact.prevent="sendChat()"
+              @keydown.enter="handleChatKeydown"
             ></textarea>
             <div class="composer-actions">
               <span>Enter 发送，Shift + Enter 换行</span>
@@ -304,19 +310,26 @@ onMounted(async () => {
         </aside>
       </div>
 
-      <section v-if="recommendedLawyers.length" class="lawyer-section">
+      <section v-if="lawyerRecommendationReady" class="lawyer-section">
         <div class="section-title">
           <h2>为您推荐</h2>
           <small>仅展示公开信息</small>
         </div>
         <div class="lawyer-grid">
-          <article v-for="lawyer in recommendedLawyers" :key="lawyer.id || lawyer.name" class="lawyer-card">
-            <div class="lawyer-avatar">{{ (lawyer.name || '律').slice(0, 1) }}</div>
-            <h3>{{ lawyer.name }}</h3>
-            <p v-if="lawyer.specialties?.length" class="specialties">
-              {{ lawyer.specialties.join(' · ') }}
-            </p>
-            <p v-if="lawyer.intro" class="intro">{{ lawyer.intro }}</p>
+          <template v-if="recommendedLawyers.length">
+            <article v-for="lawyer in recommendedLawyers" :key="lawyer.id || lawyer.name" class="lawyer-card">
+              <div class="lawyer-avatar">{{ (lawyer.name || '律').slice(0, 1) }}</div>
+              <h3>{{ lawyer.name }}</h3>
+              <p v-if="lawyer.specialties?.length" class="specialties">
+                {{ lawyer.specialties.join(' · ') }}
+              </p>
+              <p v-if="lawyer.intro" class="intro">{{ lawyer.intro }}</p>
+            </article>
+          </template>
+          <article v-else class="lawyer-card fallback-card">
+            <div class="lawyer-avatar">律</div>
+            <h3>已匹配对口律师团队</h3>
+            <p class="intro">请留下联系方式，工作人员将根据您的案情进一步匹配对口律师。</p>
           </article>
         </div>
       </section>
@@ -380,7 +393,7 @@ onMounted(async () => {
 
     <footer>
       <span>LawMind</span>
-      <span>本页面不展示内部 Agent / RAG / 工具运行信息</span>
+      <span>本页面不展示系统运行细节</span>
     </footer>
   </div>
 </template>
