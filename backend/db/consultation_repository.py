@@ -277,6 +277,8 @@ class ConsultationRepository:
                 ):
                     if key in updates:
                         setattr(existing, key, updates[key])
+                if data.get("force_source_update") and updates.get("source"):
+                    setattr(existing, "source", updates["source"])
                 self._commit("consultation update failed")
                 self.session.refresh(existing)
                 return _record_to_dict(existing)

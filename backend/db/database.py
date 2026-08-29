@@ -3,7 +3,9 @@
 Local development and tests default to SQLite; production deployments set
 DATABASE_URL to a PostgreSQL DSN.
 """
+import logging
 import os
+from typing import Any
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
@@ -56,13 +58,57 @@ def _ensure_consultation_columns() -> None:
         return
 
 
+def backfill_session_token_hashes(target_engine: Any = None) -> int:
+    """Backfill empty session hashes for legacy consultation rows, idempotently."""
+    from services.session_identity import hash_session_token, make_session_token
+
+    target = target_engine or engine
+    count = 0
+    try:
+        inspector = inspect(target)
+        if "consultations" not in inspector.get_table_names():
+            return 0
+        columns = {column["name"] for column in inspector.get_columns("consultations")}
+        if "session_token_hash" not in columns or "conversation_id" not in columns:
+            return 0
+        with target.begin() as connection:
+            rows = connection.execute(text(
+                "SELECT id, conversation_id FROM consultations "
+                "WHERE session_token_hash = '' OR session_token_hash IS NULL"
+            )).fetchall()
+            for row in rows:
+                conversation_id = str(row[1] or "")
+                token = make_session_token(conversation_id)
+                hashed = hash_session_token(token)
+                connection.execute(
+                    text(
+                        "UPDATE consultations SET session_token_hash = :hash "
+                        "WHERE id = :id"
+                    ),
+                    {"hash": hashed, "id": row[0]},
+                )
+                count += 1
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Session token hash backfill skipped", exc_info=True
+        )
+    return count
+
+
 _ensure_conversation_column = _ensure_consultation_columns
 
 
 def init_db() -> None:
-    """Create all configured tables for the current database engine."""
+    """Create all configured tables and run idempotent ownership migration."""
     Base.metadata.create_all(bind=engine)
     _ensure_consultation_columns()
+    backfill_session_token_hashes()
 
 
-__all__ = ["DATABASE_URL", "engine", "SessionLocal", "init_db"]
+__all__ = [
+    "DATABASE_URL",
+    "backfill_session_token_hashes",
+    "engine",
+    "init_db",
+    "SessionLocal",
+]

@@ -17,6 +17,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from db.database import backfill_session_token_hashes
+from db.models import Consultation
 from api.law_routes import (
     configure_app_law_services,
     derive_user_id,
@@ -26,6 +28,7 @@ from api.law_routes import (
 )
 from db.models import Base
 from services.consultation_service import ConsultationService
+from services.session_identity import get_session_secret
 from services.faq_sync_service import RequestScopedFaqSyncService
 from services.lawyer_recommendation import LawyerService
 
@@ -230,7 +233,6 @@ def _valid_consultation() -> Dict[str, Any]:
 
 def _valid_transfer() -> Dict[str, Any]:
     return {
-        "session_token": "transfer-token",
         "name": "李四",
         "phone": "13900139000",
         "consent": "是",
@@ -539,6 +541,55 @@ def test_admin_lawyer_crud(client, monkeypatch):
     assert toggled.json()["active"] is False
 
 
+def test_legacy_session_token_hash_is_backfilled_and_updatable(client, session_factory, engine, consultation_service):
+    session = session_factory()
+    try:
+        record = Consultation(
+            request_id="legacy-backfill",
+            conversation_id="legacy-conv",
+            contact_name="张*",
+            contact_phone="13800001234",
+            consent=True,
+            legal_domain="criminal",
+            status="PENDING",
+            session_token_hash="",
+        )
+        session.add(record)
+        session.commit()
+        record_id = record.id
+    finally:
+        session.close()
+
+    assert backfill_session_token_hashes(engine) == 1
+    assert backfill_session_token_hashes(engine) == 0
+    session = session_factory()
+    try:
+        record = session.get(Consultation, record_id)
+        assert record.session_token_hash == hash_session_token(
+            make_session_token("legacy-conv")
+        )
+    finally:
+        session.close()
+
+    response = client.post("/law/consultations", json={
+        "conversation_id": "legacy-conv",
+        "session_token": make_session_token("legacy-conv"),
+        "name": "李四",
+        "phone": "13900139000",
+        "consent": True,
+        "city": "北京",
+    })
+    assert response.status_code == 200
+    assert consultation_service.get_by_conversation_id("legacy-conv")["contact_name"] == "李四"
+
+
+def test_session_secret_has_no_predictable_default(monkeypatch):
+    monkeypatch.delenv("LAWMIND_SESSION_SECRET", raising=False)
+    secret = get_session_secret()
+    assert secret
+    assert secret != "lawmind-dev-session-secret"
+
+
 def test_transfer_persists_lead(client, consultation_service):
     response = client.post("/law/transfer", json=_valid_transfer())
     assert response.status_code == 200
@@ -552,7 +603,7 @@ def test_transfer_persists_lead(client, consultation_service):
     }
     assert data["consultation_id"]
     assert data["conversation_id"]
-    assert data["session_token"] == "transfer-token"
+    assert data["session_token"]
     assert data["status"] == "PENDING"
     assert data["message"]
 
@@ -562,6 +613,50 @@ def test_transfer_persists_lead(client, consultation_service):
     assert records[0]["source"] == "transfer"
     assert records[0]["contact_name"] == "李四"
     assert records[0]["contact_phone"] == "13900139000"
+
+    update = client.post("/law/transfer", json={
+        **_valid_transfer(),
+        "conversation_id": data["conversation_id"],
+        "session_token": data["session_token"],
+    })
+    assert update.status_code == 200
+    assert len(consultation_service.list_recent(limit=10)) == 1
+
+
+def test_transfer_to_existing_conversation_requires_token(client, consultation_service):
+    first = client.post("/law/consultations", json={
+        "conversation_id": "transfer-owned-conv",
+        "name": "张三",
+        "phone": "13800001234",
+        "consent": True,
+        "city": "上海",
+    })
+    assert first.status_code == 200
+    token = first.json()["session_token"]
+
+    missing = client.post("/law/transfer", json={
+        **_valid_transfer(),
+        "conversation_id": "transfer-owned-conv",
+    })
+    assert missing.status_code == 403
+
+    wrong = client.post("/law/transfer", json={
+        **_valid_transfer(),
+        "conversation_id": "transfer-owned-conv",
+        "session_token": "wrong-token",
+    })
+    assert wrong.status_code == 403
+
+    correct = client.post("/law/transfer", json={
+        **_valid_transfer(),
+        "conversation_id": "transfer-owned-conv",
+        "session_token": token,
+    })
+    assert correct.status_code == 200
+    assert len(consultation_service.list_recent(limit=10)) == 1
+    owned = consultation_service.get_by_conversation_id("transfer-owned-conv")
+    assert owned["status"] == "PENDING"
+    assert owned["source"] == "transfer"
 
 
 def test_transfer_rejects_internal_fields(client, consultation_service):

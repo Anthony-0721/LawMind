@@ -7,6 +7,12 @@ from .consultation_service import (
     ConsultationValidationError,
 )
 from .faq_sync_service import FaqSyncService, RequestScopedFaqSyncService
+from .session_identity import (
+    derive_user_id,
+    get_session_secret,
+    hash_session_token,
+    make_session_token,
+)
 from .lawyer_recommendation import (
     LAW_DOMAIN_TO_LAWYER,
     LAW_DOMAIN_TO_LAWYER_DOMAIN,
@@ -28,6 +34,10 @@ __all__ = [
     "LawyerService",
     "LawyerServiceError",
     "bootstrap_law_data",
+    "derive_user_id",
+    "get_session_secret",
+    "hash_session_token",
+    "make_session_token",
     "law_domain_to_lawyer_domain",
     "recommend_lawyers",
 ]

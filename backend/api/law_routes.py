@@ -7,7 +7,6 @@ lifespan or making LLM calls.
 """
 from __future__ import annotations
 
-import hashlib
 import inspect
 import os
 import re
@@ -20,6 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from core.intent_recognizer import UrgencyLevel
 from core.law_domain import LawIntent, LawRiskFlag
+from services.session_identity import (
+    derive_user_id,
+    get_session_secret,
+    hash_session_token,
+    make_session_token,
+)
 
 _MOBILE_RE = re.compile(r"^1[3-9]\d{9}$")
 _TRUE_CONSENT_TOKENS = frozenset({"1", "true", "yes", "是", "同意", "愿意"})
@@ -155,6 +160,7 @@ class LawTransferRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    conversation_id: Optional[str] = None
     session_token: Optional[str] = None
     name: str
     phone: str
@@ -337,34 +343,12 @@ def _require(runtime: LawRuntime, name: str, message: str) -> Any:
     return value
 
 
+_session_secret = get_session_secret
+
+
 class _PublicRole:
     def __init__(self, value: str):
         self.value = value
-
-
-def _session_secret() -> str:
-    return os.getenv("LAWMIND_SESSION_SECRET") or "lawmind-dev-session-secret"
-
-
-def derive_user_id(conversation_id: str) -> str:
-    """Derive a stable internal user id from the server secret + conversation."""
-    return hashlib.sha256(
-        (_session_secret() + str(conversation_id or "")).encode("utf-8")
-    ).hexdigest()[:16]
-
-
-def make_session_token(conversation_id: str) -> str:
-    """Return the deterministic server-issued token for a conversation."""
-    return hashlib.sha256(
-        (_session_secret() + ":session:" + str(conversation_id or "")).encode("utf-8")
-    ).hexdigest()[:32]
-
-
-def hash_session_token(session_token: str) -> str:
-    """Hash a session token before persistence."""
-    return hashlib.sha256(
-        (_session_secret() + ":hash:" + str(session_token or "")).encode("utf-8")
-    ).hexdigest()
 
 
 def _lead_payload(
@@ -392,6 +376,7 @@ def _lead_payload(
         "consent": consent,
         "request_id": str(uuid.uuid4()),
         "source": source,
+        "force_source_update": source == "transfer",
     }
     if city is not None:
         payload["city"] = str(city or "").strip()
@@ -738,7 +723,13 @@ def create_transfer_request(
     consultation_service = _require(
         runtime, "consultation_service", "咨询记录服务未初始化"
     )
+    _validate_consultation_ownership(
+        consultation_service,
+        body.conversation_id,
+        body.session_token,
+    )
     payload = _lead_payload(
+        conversation_id=body.conversation_id,
         session_token=body.session_token,
         name=body.name,
         phone=body.phone,
@@ -758,7 +749,7 @@ def create_transfer_request(
         not isinstance(saved, Mapping)
         or saved.get("success") is False
         or saved.get("persisted") is False
-        or str(saved.get("status") or "").upper() != "PENDING"
+        or str(saved.get("status") or "").upper() not in _CONSULTATION_STATUSES
     ):
         raise HTTPException(status_code=400, detail="转人工信息不完整，请检查后重试")
     return {
@@ -1275,6 +1266,7 @@ __all__ = [
     "LawChatPublicResponse",
     "LawChatRequest",
     "derive_user_id",
+    "get_session_secret",
     "hash_session_token",
     "make_session_token",
     "create_law_router",
