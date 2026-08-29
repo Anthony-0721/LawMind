@@ -46,6 +46,13 @@ class FakeClient:
         raise AssertionError("EscalationAgent must not call the LLM")
 
 
+class RaisingSkillManager:
+    """SkillManager that fails so EscalationAgent can prove deterministic fallback."""
+
+    def prompt_for(self, message, agent_type):
+        raise RuntimeError("simulated skill manager failure")
+
+
 class FakeToolClient:
     """Fake client that triggers one failed RAG search, then returns text."""
 
@@ -245,6 +252,82 @@ def test_escalation_runtime_skill_prompt_is_populated():
     assert result.metadata.get("skill_prompt_used") is True
     assert result.metadata.get("skill_prompt_chars", 0) > 0
     assert "人工升级与留资规范" not in result.content
+
+
+def test_escalation_routes_and_propagates_skill_prompt_for_detention():
+    skill_manager = SkillManager(str(BACKEND_ROOT / "skills" / "law_firm"))
+    skill_manager.load()
+    orchestrator = AgentOrchestrator(
+        api_key="test-key",
+        model="test-model",
+        client=FakeClient(),
+        skill_manager=skill_manager,
+    )
+    req = make_request(
+        "家人已经被刑事拘留，需要律师",
+        intent=LawIntent.CRIMINAL_DEFENSE,
+        risk_flags=[LawRiskFlag.DETENTION],
+    )
+
+    result = asyncio.run(orchestrator.run(req))
+
+    assert result.primary_agent == AgentType.ESCALATION
+    assert result.escalated is True
+    assert result.skill_prompt
+    assert "人工升级与留资规范" in result.skill_prompt
+
+
+def test_escalation_routes_and_propagates_skill_prompt_for_contact():
+    skill_manager = SkillManager(str(BACKEND_ROOT / "skills" / "law_firm"))
+    skill_manager.load()
+    orchestrator = AgentOrchestrator(
+        api_key="test-key",
+        model="test-model",
+        client=FakeClient(),
+        skill_manager=skill_manager,
+    )
+    req = make_request(
+        "我想留联系方式并转人工客服",
+        intent=LawIntent.LAWYER_APPOINTMENT,
+    )
+
+    result = asyncio.run(orchestrator.run(req))
+
+    assert result.primary_agent == AgentType.ESCALATION
+    assert result.skill_prompt
+    assert "人工升级与留资规范" in result.skill_prompt
+
+
+def test_parallel_result_propagates_escalation_skill_prompt():
+    from agents.agent_orchestrator import RoutingDecision
+
+    skill_manager = SkillManager(str(BACKEND_ROOT / "skills" / "law_firm"))
+    skill_manager.load()
+    orchestrator = AgentOrchestrator(
+        api_key="test-key",
+        model="test-model",
+        client=FakeClient(),
+        skill_manager=skill_manager,
+    )
+    req = make_request("我想转人工", intent=LawIntent.LAWYER_APPOINTMENT)
+    result = asyncio.run(
+        orchestrator.run_parallel(req, RoutingDecision(AgentType.ESCALATION))
+    )
+    assert result.skill_prompt
+    assert "人工升级与留资规范" in result.skill_prompt
+
+
+def test_escalation_skill_manager_failure_keeps_deterministic_success():
+    agent = EscalationAgent(FakeClient(), "test-model", skill_manager=RaisingSkillManager())
+    req = make_request("我想转人工", intent=LawIntent.LAWYER_APPOINTMENT)
+
+    result = asyncio.run(agent.handle(req))
+
+    assert result.success is True
+    assert result.escalate is True
+    assert agent._last_skill_prompt == ""
+    assert result.skill_prompt == ""
+    assert result.metadata.get("skill_prompt_injected") is False
 
 
 def test_old_intent_recognizer_api_remains_importable():

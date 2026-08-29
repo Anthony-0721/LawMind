@@ -212,6 +212,32 @@ def test_representative_skill_phrases_inject_matching_skills():
         assert "律所前台接待规范" in prompt, phrase
 
 
+def test_escalation_skill_injects_without_message_keywords():
+    manager = SkillManager(str(SKILLS_DIR))
+    manager.load()
+    prompt = manager.prompt_for("这是一段与关键词无关的随机内容", "escalation")
+    assert "人工升级与留资规范" in prompt
+
+
+def test_per_agent_model_env_fallback(monkeypatch):
+    from agents.agent_orchestrator import AgentOrchestrator, CriminalDefenseAgent
+
+    primary = "LAWMIND_CRIMINAL_MODEL"
+    legacy = LEGACY_ENV_PREFIX + "CRIMINAL_MODEL"
+    monkeypatch.setenv(primary, "lawmind-criminal-model")
+    monkeypatch.setenv(legacy, "legacy-criminal-model")
+    agent = AgentOrchestrator._make_agent(
+        CriminalDefenseAgent, None, "default-model", None
+    )
+    assert agent._model == "lawmind-criminal-model"
+
+    monkeypatch.delenv(primary)
+    agent = AgentOrchestrator._make_agent(
+        CriminalDefenseAgent, None, "default-model", None
+    )
+    assert agent._model == "legacy-criminal-model"
+
+
 def test_backward_compatible_env_fallback(monkeypatch):
     import api.main as api_main
 

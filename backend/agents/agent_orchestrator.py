@@ -134,6 +134,7 @@ class AgentResponse:
     escalate:    bool  = False   # 是否需要升级
     tools_used:  List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    skill_prompt: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -233,6 +234,7 @@ class OrchestratorResult:
     supporting_agents: List[AgentType] = field(default_factory=list)
     tools_used: List[str] = field(default_factory=list)
     tool_traces: List[Dict[str, Any]] = field(default_factory=list)
+    skill_prompt: str = ""
     routing_reason: str = ""
     routing_confidence: float = 0.0
 
@@ -755,7 +757,11 @@ class EscalationAgent(BaseAgent):
         self.stats.total += 1
         skill_prompt = ""
         if self._skill_manager is not None:
-            skill_prompt = self._skill_manager.prompt_for(req.message, self.agent_type.value)
+            try:
+                skill_prompt = self._skill_manager.prompt_for(req.message, self.agent_type.value)
+            except Exception:
+                skill_prompt = ""
+                logger.warning("Escalation Skill prompt 注入失败，继续确定性人工交接")
         self._last_skill_prompt = skill_prompt
         intent = req.intent.value if req.intent else "unknown"
         urgency = req.urgency.name if req.urgency else "UNKNOWN"
@@ -840,6 +846,7 @@ class EscalationAgent(BaseAgent):
             escalate=True,
             tools_used=tools_used,
             tool_traces=tool_traces,
+            skill_prompt=self._last_skill_prompt,
             metadata={
                 "skill_prompt_injected": bool(skill_prompt),
                 "skill_prompt_used": bool(skill_prompt),
@@ -1085,6 +1092,7 @@ class AgentOrchestrator:
             supporting_agents=[],
             tools_used=list(response.tools_used),
             tool_traces=list(response.tool_traces),
+            skill_prompt=response.skill_prompt,
             routing_reason=decision.reason,
             routing_confidence=decision.confidence,
         )
@@ -1114,6 +1122,14 @@ class AgentOrchestrator:
             for response in valid_responses
             for trace in response.tool_traces
         ]
+        escalation_skill_prompt = next(
+            (
+                response.skill_prompt
+                for response in valid_responses
+                if response.agent_type == AgentType.ESCALATION and response.skill_prompt
+            ),
+            "",
+        )
         result = OrchestratorResult(
             request_id=req.request_id,
             response=combined,
@@ -1129,6 +1145,7 @@ class AgentOrchestrator:
             supporting_agents=decision.supporting_agents,
             tools_used=tools_used,
             tool_traces=tool_traces,
+            skill_prompt=escalation_skill_prompt,
             routing_reason=decision.reason,
             routing_confidence=decision.confidence,
         )
