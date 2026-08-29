@@ -657,20 +657,6 @@ class AgentOrchestrator:
       3. 刑事/民事专属 Agent 失败时降级到 ReceptionAgent
     """
 
-    # 法律意图 → Agent 类型的静态映射（路由表）
-    _INTENT_ROUTING: Dict[LawIntent, AgentType] = {
-        LawIntent.DANGEROUS_DRIVING: AgentType.CRIMINAL,
-        LawIntent.CRIMINAL_DEFENSE: AgentType.CRIMINAL,
-        LawIntent.LABOR_DISPUTE: AgentType.CIVIL,
-        LawIntent.MARRIAGE_FAMILY: AgentType.CIVIL,
-        LawIntent.CONTRACT_DISPUTE: AgentType.CIVIL,
-        LawIntent.TRAFFIC_ACCIDENT: AgentType.CIVIL,
-        LawIntent.CIVIL_LOAN: AgentType.CIVIL,
-        LawIntent.LAWYER_APPOINTMENT: AgentType.ESCALATION,
-        LawIntent.LAW_FIRM_SERVICE: AgentType.RECEPTION,
-        LawIntent.OTHER: AgentType.RECEPTION,
-    }
-
     def __init__(
         self,
         api_key:  str,
@@ -816,6 +802,7 @@ class AgentOrchestrator:
             response.escalate
             or req.urgency == UrgencyLevel.CRITICAL
             or LawRiskFlag.DETENTION in req.risk_flags
+            or LawRiskFlag.COURT_SOON in req.risk_flags
             or req.intent == LawIntent.LAWYER_APPOINTMENT
         ):
             escalated = True
@@ -843,7 +830,7 @@ class AgentOrchestrator:
     async def run_parallel(self, req: Request, decision: RoutingDecision) -> OrchestratorResult:
         """
         并行派发给多个 Agent，合并结果。
-        适用于复杂问题（如同时涉及技术和账单）。
+        适用于同时涉及刑事与民事等复合法律领域。
         """
         t0 = time.monotonic()
         agent_types = decision.agent_types
@@ -886,41 +873,21 @@ class AgentOrchestrator:
 
     # ── 路由逻辑 ──────────────────────────────────────────────────────────────
 
-    def _route(
-        self,
-        intent: Optional[LawIntent],
-        urgency: Optional[UrgencyLevel],
-        risk_flags: Optional[List[LawRiskFlag]] = None,
-    ) -> AgentType:
-        """
-        三层路由决策：
-          1. 风险/紧急度覆盖（CRITICAL、刑事拘留直接升级）
-          2. 法律意图映射
-          3. 默认 RECEPTION
-        """
-        if urgency == UrgencyLevel.CRITICAL:
-            return AgentType.ESCALATION
-        if risk_flags and LawRiskFlag.DETENTION in risk_flags:
-            return AgentType.ESCALATION
-
-        if intent and intent in self._INTENT_ROUTING:
-            target = self._INTENT_ROUTING[intent]
-            if target in self._pool and self._pool[target]:
-                return target
-
-        return AgentType.RECEPTION
-
     def _route_decision(self, req: Request) -> RoutingDecision:
         """
         律所结构化路由决策。
 
-        刑事拘留/CRITICAL 紧急度优先升级；律师预约也直接升级；
+        刑事拘留、即将开庭/CRITICAL 紧急度优先升级；律师预约也直接升级；
         随后按领域分数选择主 Agent 和可能的跨领域辅助 Agent。
         """
-        if req.urgency == UrgencyLevel.CRITICAL or LawRiskFlag.DETENTION in req.risk_flags:
+        if (
+            req.urgency == UrgencyLevel.CRITICAL
+            or LawRiskFlag.DETENTION in req.risk_flags
+            or LawRiskFlag.COURT_SOON in req.risk_flags
+        ):
             return RoutingDecision(
                 primary_agent=AgentType.ESCALATION,
-                reason="刑事拘留或紧急度为 CRITICAL，触发人工升级路由",
+                reason="刑事拘留、即将开庭或紧急度为 CRITICAL，触发人工升级路由",
                 confidence=1.0,
             )
 
@@ -1012,9 +979,13 @@ class AgentOrchestrator:
 
         if LawRiskFlag.COURT_SOON in req.risk_flags:
             scores[AgentType.CRIMINAL] += 0.2
+        if LawRiskFlag.FILED in req.risk_flags or LawRiskFlag.PROSECUTION in req.risk_flags:
+            scores[AgentType.CRIMINAL] += 0.8
+        if LawRiskFlag.TRAFFIC_ACCIDENT in req.risk_flags or LawRiskFlag.INJURY in req.risk_flags:
+            scores[AgentType.CIVIL] += 0.8
         if LawRiskFlag.NO_LAWYER in req.risk_flags:
-            scores[AgentType.CRIMINAL] += 0.15
-            scores[AgentType.CIVIL] += 0.15
+            scores[AgentType.CRIMINAL] += 0.3
+            scores[AgentType.CIVIL] += 0.3
         if req.entities.get("blood_alcohol"):
             scores[AgentType.CRIMINAL] += 0.2
         if req.entities.get("disputed_amount"):
@@ -1039,52 +1010,6 @@ class AgentOrchestrator:
             f"intent={intent}, group={req.intent_group or 'unknown'}, "
             f"primary={primary_agent.value}, supporting={support_text}, scores=[{score_text}]"
         )
-
-    def _collaboration_targets(self, req: Request) -> List[AgentType]:
-        """
-        判断是否需要多个律所 Agent 并行协作。
-
-        用法律领域关键词补充识别复合问题，例如“醉驾后发生交通事故”
-        或“离婚且对方欠款”可能同时命中刑事/民事；刑事拘留等风险会加入升级目标。
-        """
-        msg = req.message.lower()
-        targets: List[AgentType] = []
-
-        criminal_kws = [
-            "醉驾", "酒驾", "危险驾驶", "刑事拘留", "被拘留", "羁押",
-            "刑事辩护", "取保候审", "审查起诉", "开庭", "看守所",
-        ]
-        civil_kws = [
-            "劳动仲裁", "拖欠工资", "离婚", "抚养权", "合同纠纷", "违约",
-            "交通事故", "车祸", "民间借贷", "欠钱", "借条", "债务",
-        ]
-        reception_kws = [
-            "怎么收费", "收费标准", "律所地址", "咨询流程", "服务流程",
-            "代理费", "工作时间", "预约律师", "律师推荐", "转人工",
-        ]
-
-        if req.intent in (LawIntent.DANGEROUS_DRIVING, LawIntent.CRIMINAL_DEFENSE) or any(
-            kw in msg for kw in criminal_kws
-        ):
-            targets.append(AgentType.CRIMINAL)
-        if req.intent in (
-            LawIntent.LABOR_DISPUTE,
-            LawIntent.MARRIAGE_FAMILY,
-            LawIntent.CONTRACT_DISPUTE,
-            LawIntent.TRAFFIC_ACCIDENT,
-            LawIntent.CIVIL_LOAN,
-        ) or any(kw in msg for kw in civil_kws):
-            targets.append(AgentType.CIVIL)
-        if req.intent in (LawIntent.LAW_FIRM_SERVICE, LawIntent.OTHER) or any(
-            kw in msg for kw in reception_kws
-        ):
-            targets.append(AgentType.RECEPTION)
-
-        if LawRiskFlag.DETENTION in req.risk_flags or req.urgency == UrgencyLevel.CRITICAL:
-            targets.append(AgentType.ESCALATION)
-
-        deduped = list(dict.fromkeys(targets))
-        return [agent_type for agent_type in deduped if self._pool.get(agent_type)]
 
     @staticmethod
     def _needs_clarification(req: Request) -> bool:

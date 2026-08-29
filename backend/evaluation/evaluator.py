@@ -27,7 +27,6 @@ from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
 
-from core.intent_recognizer import IntentCategory, IntentRecognizer
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +105,7 @@ Agent 响应: {response}
 
 只返回 JSON，例如: {{"relevance": 0.9, "accuracy": 0.8, "completeness": 0.7, "helpfulness": 0.85}}"""
 
-    def __init__(self, client: AsyncAnthropic, model: str):
+    def __init__(self, client: Any, model: str):
         self._client = client
         self._model  = model
 
@@ -160,7 +159,7 @@ Agent 响应: {response}
 class IntentEvaluator:
     """评测意图识别的准确率和 F1。"""
 
-    def __init__(self, recognizer: IntentRecognizer):
+    def __init__(self, recognizer: Any):
         self._recognizer = recognizer
 
     async def evaluate(self, cases: List[IntentTestCase]) -> Dict[str, Any]:
@@ -177,7 +176,7 @@ class IntentEvaluator:
                 "expected": case.expected_intent,
                 "predicted": predicted,
                 "confidence": result.confidence,
-                "reasoning": result.reasoning,
+                "reasoning": getattr(result, "reasoning", ""),
             })
 
         # 纯 Python 计算指标
@@ -227,16 +226,18 @@ class EndToEndEvaluator:
     def __init__(
         self,
         orchestrator,
-        recognizer: IntentRecognizer,
+        recognizer: Any,
         api_key:  str,
         base_url: Optional[str] = None,
         model:    str = "claude-3-5-sonnet-20241022",
         baseline_path: Optional[str] = None,
+        client: Optional[Any] = None,
     ):
-        kwargs: Dict[str, Any] = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        client = AsyncAnthropic(**kwargs)
+        if client is None:
+            kwargs: Dict[str, Any] = {"api_key": api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            client = AsyncAnthropic(**kwargs)
 
         self._orchestrator     = orchestrator
         self._judge            = LLMJudge(client, model)
@@ -479,23 +480,23 @@ class EndToEndEvaluator:
 # ── 内置测试用例（开箱即用）──────────────────────────────────────────────────
 
 DEFAULT_INTENT_CASES: List[IntentTestCase] = [
-    IntentTestCase("我的订单什么时候到？",       "logistics"),
-    IntentTestCase("帮我取消订单",               "request"),
-    IntentTestCase("你们服务太差了！",            "complaint"),
-    IntentTestCase("应用一直报500错误",           "technical_crash"),
-    IntentTestCase("为什么扣了两次款？",          "payment_issue"),
-    IntentTestCase("我要投诉，转人工！",          "human_handoff"),
-    IntentTestCase("你好",                        "greeting"),
-    IntentTestCase("修改我的邮箱地址",            "account"),
-    IntentTestCase("帮我开发票",                  "invoice"),
-    IntentTestCase("退款多久到账？",              "refund"),
-    IntentTestCase("登录一直报401",               "technical_login"),
+    IntentTestCase("我可能醉驾被查了，会怎么样？", "dangerous_driving"),
+    IntentTestCase("家人已经被刑事拘留，想找辩护律师", "criminal_defense"),
+    IntentTestCase("公司拖欠工资，我想申请劳动仲裁", "labor_dispute"),
+    IntentTestCase("我想咨询离婚和抚养权", "marriage_family"),
+    IntentTestCase("合同纠纷，对方违约，想起诉", "contract_dispute"),
+    IntentTestCase("交通事故责任认定和赔偿", "traffic_accident"),
+    IntentTestCase("民间借贷，对方欠钱不还，有借条", "civil_loan"),
+    IntentTestCase("帮我预约律师", "lawyer_appointment"),
 ]
 
 DEFAULT_DIALOG_CASES: List[Dict[str, Any]] = [
-    {"question": "我的订单 #12345 还没到，已经超时了"},
-    {"question": "应用登录一直报错 401"},
-    {"question": "为什么这个月多扣了 50 块钱？"},
-    {"question": "帮我把收货地址改成北京市朝阳区"},
-    {"turns": ["你好，我想退款", "订单号是 #12345", "退款多久能到账？"]},
+    {"question": "我今晚醉驾被交警查到，血液酒精可能超标，需要律师吗？"},
+    {"question": "家人已经被刑事拘留，明天开庭，目前还没有委托律师"},
+    {"question": "我想离婚，孩子抚养权和财产分割应该怎么处理？"},
+    {"question": "公司拖欠工资，我想申请劳动仲裁，需要准备什么材料？"},
+    {"question": "合同纠纷，对方违约，想起诉需要什么材料？"},
+    {"question": "发生交通事故后责任认定有争议，应该怎么主张赔偿？"},
+    {"question": "朋友民间借贷欠钱不还，我有借条，应该怎么处理？"},
+    {"question": "我已经联系过律师，想预约一次正式咨询"},
 ]

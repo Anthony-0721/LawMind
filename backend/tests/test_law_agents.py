@@ -203,3 +203,52 @@ def test_production_path_uses_law_intent_recognizer():
 
     orchestrator = make_orchestrator()
     assert isinstance(orchestrator._intent_recognizer, LawIntentRecognizer)
+
+def test_court_soon_routes_to_escalation_agent():
+    orchestrator = make_orchestrator()
+    req = make_request(
+        "明天开庭，需要律师",
+        intent=LawIntent.CRIMINAL_DEFENSE,
+        urgency=UrgencyLevel.HIGH,
+        risk_flags=[LawRiskFlag.COURT_SOON, LawRiskFlag.NO_LAWYER],
+    )
+
+    decision = orchestrator._route_decision(req)
+
+    assert decision.primary_agent == AgentType.ESCALATION
+
+
+def test_other_risk_flags_route_to_domain_agents_not_escalation():
+    orchestrator = make_orchestrator()
+    cases = [
+        (
+            LawIntent.CRIMINAL_DEFENSE,
+            [LawRiskFlag.FILED, LawRiskFlag.PROSECUTION, LawRiskFlag.NO_LAWYER],
+            AgentType.CRIMINAL,
+        ),
+        (
+            LawIntent.TRAFFIC_ACCIDENT,
+            [LawRiskFlag.INJURY, LawRiskFlag.TRAFFIC_ACCIDENT, LawRiskFlag.NO_LAWYER],
+            AgentType.CIVIL,
+        ),
+        (
+            LawIntent.OTHER,
+            [LawRiskFlag.FILED, LawRiskFlag.PROSECUTION, LawRiskFlag.NO_LAWYER],
+            AgentType.CRIMINAL,
+        ),
+        (
+            LawIntent.OTHER,
+            [LawRiskFlag.INJURY, LawRiskFlag.TRAFFIC_ACCIDENT, LawRiskFlag.NO_LAWYER],
+            AgentType.CIVIL,
+        ),
+    ]
+
+    for intent, risk_flags, expected in cases:
+        req = make_request(
+            f"测试 {intent.value}",
+            intent=intent,
+            urgency=UrgencyLevel.HIGH,
+            risk_flags=risk_flags,
+        )
+        decision = orchestrator._route_decision(req)
+        assert decision.primary_agent == expected, intent
