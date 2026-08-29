@@ -12,6 +12,8 @@ venv/
 
 # 数据目录
 data/
+*.db
+*.sqlite3
 logs/
 
 # IDE
@@ -28,6 +30,7 @@ Thumbs.db
 build-image*.sh
 
 # ChromaDB 本地数据
+*.db
 *.sqlite3
 
 # 备份文件

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from db.common import RecordDict, coerce_datetime
@@ -18,6 +19,10 @@ from db.models import Consultation
 
 _CONSULTATION_FIELDS = set(Consultation.__table__.columns.keys())
 _CONSULTATION_FIELDS.discard("id")
+
+
+class ConsultationStoreError(Exception):
+    """Sanitized database failure raised without bound PII."""
 
 
 def _as_bool(value: Any) -> bool:
@@ -182,6 +187,34 @@ class ConsultationRepository:
     def __init__(self, session: Session):
         self.session = session
 
+    def _commit(self, error_message: str = "consultation save failed") -> None:
+        """Commit or sanitize a database failure. Never logs exception params."""
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            raise ConsultationStoreError(error_message) from None
+        except Exception:
+            self.session.rollback()
+            raise ConsultationStoreError(error_message) from None
+
+    def _commit_save(self, request_id: str) -> Optional[Consultation]:
+        """Commit a save; on a race rollback and re-read the winning row."""
+        try:
+            self.session.commit()
+            return None
+        except IntegrityError:
+            self.session.rollback()
+            existing = self.session.scalar(
+                select(Consultation).where(Consultation.request_id == request_id)
+            )
+            if existing is not None:
+                return existing
+            raise ConsultationStoreError("consultation save failed") from None
+        except Exception:
+            self.session.rollback()
+            raise ConsultationStoreError("consultation save failed") from None
+
     # ── Save ──────────────────────────────────────────────────────────────
 
     def save_from_agent(
@@ -232,7 +265,9 @@ class ConsultationRepository:
             fields["consent"] = consent
             record = Consultation(**fields)
             self.session.add(record)
-            self.session.commit()
+            stored = self._commit_save(request_id)
+            if stored is not None:
+                return _record_to_dict(stored)
             self.session.refresh(record)
             return _record_to_dict(record)
 
@@ -240,7 +275,9 @@ class ConsultationRepository:
             if key == "status" and not value:
                 continue
             setattr(existing, key, value)
-        self.session.commit()
+        stored = self._commit_save(request_id)
+        if stored is not None:
+            return _record_to_dict(stored)
         self.session.refresh(existing)
         return _record_to_dict(existing)
 
@@ -295,7 +332,7 @@ class ConsultationRepository:
         if record is None:
             return None
         record.status = str(status)
-        self.session.commit()
+        self._commit("consultation update failed")
         self.session.refresh(record)
         return _record_to_dict(record)
 
@@ -304,8 +341,8 @@ class ConsultationRepository:
         if record is None:
             return False
         self.session.delete(record)
-        self.session.commit()
+        self._commit("consultation delete failed")
         return True
 
 
-__all__ = ["ConsultationRepository"]
+__all__ = ["ConsultationRepository", "ConsultationStoreError"]

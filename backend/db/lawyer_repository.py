@@ -60,6 +60,14 @@ class LawyerRepository:
     # ── Seed / Read ───────────────────────────────────────────────────────
 
     def seed_lawyers(self, lawyers: Sequence[Mapping[str, Any]]) -> int:
+        """Insert missing lawyers by name+domain; returns the number inserted."""
+        existing_keys = {
+            (str(name).strip(), str(domain).strip())
+            for name, domain in self.session.execute(
+                select(Lawyer.name, Lawyer.domain)
+            ).all()
+        }
+        seen_keys = set(existing_keys)
         count = 0
         for item in lawyers or []:
             if not isinstance(item, Mapping):
@@ -70,6 +78,16 @@ class LawyerRepository:
             fields.setdefault("active", True)
             fields.setdefault("domain", "general")
             fields.setdefault("specialties", [])
+            name = str(fields["name"]).strip()
+            domain = str(fields["domain"]).strip()
+            if not name:
+                continue
+            fields["name"] = name
+            fields["domain"] = domain
+            key = (name, domain)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             self.session.add(Lawyer(**fields))
             count += 1
         self.session.commit()

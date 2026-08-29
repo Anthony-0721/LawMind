@@ -269,3 +269,127 @@ def test_faq_active_category_filter(session):
     matches = repo.find_active_by_category("criminal")
     assert [item["id"] for item in matches] != [inactive["id"]]
     assert len(matches) == 1
+
+
+def test_faq_mark_synced_and_mark_failed(session):
+    repo = FaqRepository(session)
+    faq = repo.create({
+        "category": "criminal",
+        "question": "同步状态 FAQ",
+        "answer": "原始回答",
+        "keywords": ["同步"],
+    })
+
+    synced = repo.mark_synced(faq["id"], 2)
+    assert synced is not None
+    assert synced["sync_status"] == "synced"
+    assert synced["version"] == 2
+    assert synced["sync_error"] is None
+    assert synced["last_sync_at"] is not None
+
+    failed = repo.mark_sync_failed(faq["id"], "chroma unavailable")
+    assert failed is not None
+    assert failed["sync_status"] == "failed"
+    assert failed["sync_error"] == "chroma unavailable"
+    assert failed["version"] == 2
+
+
+def test_faq_update_preserves_explicit_sync_status(session):
+    repo = FaqRepository(session)
+    faq = repo.create({
+        "category": "criminal",
+        "question": "显式同步状态 FAQ",
+        "answer": "原始回答",
+    })
+    repo.mark_synced(faq["id"], 3)
+
+    updated = repo.update(faq["id"], {
+        "sync_status": "failed",
+        "sync_error": "explicit error",
+    })
+    assert updated is not None
+    assert updated["sync_status"] == "failed"
+    assert updated["sync_error"] == "explicit error"
+    assert updated["version"] >= 3
+
+
+def test_consultation_integrity_error_rereturns_existing(session, monkeypatch):
+    repo = ConsultationRepository(session)
+    payload = {
+        "request_id": "req-race-1",
+        "contact_name": "张*",
+        "contact_phone": "138****1234",
+        "consent": True,
+        "legal_domain": "dangerous_driving",
+    }
+    existing = repo.save_public(payload)
+
+    real_scalar = session.scalar
+    calls = {"count": 0}
+
+    def first_lookup_returns_none(statement, *args, **kwargs):
+        if str(statement).find("consultations") >= 0 and calls["count"] == 0:
+            calls["count"] += 1
+            return None
+        return real_scalar(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, "scalar", first_lookup_returns_none)
+    result = repo.save_public(payload)
+
+    assert result["id"] == existing["id"]
+    assert isinstance(result, dict)
+    assert len(repo.list_recent(10)) == 1
+
+
+def test_consultation_db_exception_is_sanitized(session, monkeypatch):
+    from db.consultation_repository import ConsultationStoreError
+
+    repo = ConsultationRepository(session)
+
+    def fail_commit():
+        raise RuntimeError("db params leaked: 张* 138****1234")
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+    with pytest.raises(ConsultationStoreError) as exc_info:
+        repo.save_public({
+            "request_id": "req-sanitize-1",
+            "contact_name": "张*",
+            "contact_phone": "138****1234",
+            "consent": True,
+            "legal_domain": "dangerous_driving",
+        })
+
+    message = str(exc_info.value)
+    assert message == "consultation save failed"
+    assert "张*" not in message
+    assert "138****1234" not in message
+
+
+def test_seeding_is_idempotent(session):
+    faqs = [
+        {
+            "category": "criminal",
+            "question": "幂等 FAQ",
+            "answer": "答案",
+            "keywords": ["幂等"],
+            "active": True,
+        }
+    ]
+    lawyers = [
+        {
+            "name": "幂等律师",
+            "domain": "criminal",
+            "specialties": ["醉驾"],
+            "active": True,
+        }
+    ]
+
+    faq_repo = FaqRepository(session)
+    assert faq_repo.seed_faqs(faqs) == 1
+    assert faq_repo.seed_faqs(faqs) == 0
+    assert len(faq_repo.list_all()) == 1
+
+    lawyer_repo = LawyerRepository(session)
+    assert lawyer_repo.seed_lawyers(lawyers) == 1
+    assert lawyer_repo.seed_lawyers(lawyers) == 0
+    assert len(lawyer_repo.list_all()) == 1
