@@ -112,7 +112,9 @@ LAW_TEMPLATES: Dict[LawIntent, List[str]] = {
     ],
     LawIntent.TRAFFIC_ACCIDENT: [
         "交通事故",
-        "事故",
+        "车祸",
+        "行人受伤",
+        "车辆相撞",
         "责任认定",
         "追尾",
         "交通肇事",
@@ -196,7 +198,9 @@ LAW_PATTERNS: Dict[LawIntent, List[str]] = {
     ],
     LawIntent.TRAFFIC_ACCIDENT: [
         "交通事故",
-        "事故",
+        "车祸",
+        "行人受伤",
+        "车辆相撞",
         "责任认定",
         "撞车",
         "追尾",
@@ -277,7 +281,9 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
     ],
     LawRiskFlag.TRAFFIC_ACCIDENT: [
         "交通事故",
-        "事故",
+        "车祸",
+        "行人受伤",
+        "车辆相撞",
         "撞车",
         "追尾",
         "交通肇事",
@@ -311,6 +317,13 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
 
 
 _NEGATION_PHRASES = (
+    "尚未立案",
+    "未受伤",
+    "无事故",
+    "无交通事故",
+    "没请",
+    "未请",
+    "未委托",
     "并不是没有",
     "不是没有",
     "并没有",
@@ -320,9 +333,11 @@ _NEGATION_PHRASES = (
     "未构成",
     "未造成",
     "未发现",
+    "未被",
     "没有",
-    "不是",
+    "并无",
     "并非",
+    "不是",
     "并不",
     "不涉及",
     "不",
@@ -330,27 +345,52 @@ _NEGATION_PHRASES = (
 )
 _NEGATION_SCOPE_RE = re.compile("|".join(re.escape(p) for p in _NEGATION_PHRASES))
 _SCOPE_BREAK_RE = re.compile(
-    r"[，。；！？、,.!?;]|但是|不过|然而|而且|并且|同时|但|而"
+    r"但是|不过|然而|但|而|[。！？；，,;!？]"
 )
 _DOUBLE_NEGATION_NO_LAWYER_RE = re.compile(
-    r"(?:并不是没有|不是没有|并非没有|并不是未|不是未|并未没有|并没有没有)"
-    r"(?:律师|请律师|委托律师|代理人|聘请律师)"
+    r"(?:并不是没请|不是没请|并非未委托|并不是没有|不是没有|并非没有|并不是未|不是未|并未没有|并没有没有)"
+    r"(?:律师|请律师|委托律师|代理人|聘请律师|代理)"
 )
-_SCOPE_LIMIT = 64
+_POSITIVE_LAWYER_RE = re.compile(
+    r"(?<!没)(?<!未)(?<!无)(?:有律师|已委托律师|委托了律师|我的律师|聘请了律师|已经委托了)"
+)
+_NEGATION_SEARCH_BEFORE = 12
+_NEGATION_SEARCH_AFTER = 8
 
 
-def _scope_segment(text: str, index: int) -> str:
-    prefix = text[max(0, index - _SCOPE_LIMIT):index]
-    parts = _SCOPE_BREAK_RE.split(prefix)
-    return parts[-1] if parts else prefix
+def _clauses(text: str) -> list[str]:
+    return [part.strip() for part in re.split(_SCOPE_BREAK_RE, text) if part.strip()]
+
+
+def _same_clause(
+    text: str,
+    phrase_start: int,
+    phrase_end: int,
+    keyword_start: int,
+    keyword_end: int,
+) -> bool:
+    low = min(phrase_start, keyword_start)
+    high = max(phrase_end, keyword_end)
+    return not _SCOPE_BREAK_RE.search(text[low:high])
 
 
 def _is_negated_at(text: str, keyword: str, index: int) -> bool:
-    return bool(_NEGATION_SCOPE_RE.search(_scope_segment(text, index)))
+    search_start = max(0, index - _NEGATION_SEARCH_BEFORE)
+    search_end = min(len(text), index + len(keyword) + _NEGATION_SEARCH_AFTER)
+    local = text[search_start:search_end]
+    keyword_end = index + len(keyword)
+    for match in _NEGATION_SCOPE_RE.finditer(local):
+        phrase_start = search_start + match.start()
+        phrase_end = search_start + match.end()
+        if not _same_clause(text, phrase_start, phrase_end, index, keyword_end):
+            continue
+        if phrase_end >= index - 8 and phrase_start <= keyword_end + 8:
+            return True
+    return False
 
 
 def has_unnegated_keyword(text: str, keyword: str) -> bool:
-    """Return True when keyword occurs in an unnegated scope."""
+    """Return True when keyword occurs in a bounded unnegated local context."""
     index = text.find(keyword)
     while index != -1:
         if not _is_negated_at(text, keyword, index):
@@ -359,32 +399,22 @@ def has_unnegated_keyword(text: str, keyword: str) -> bool:
     return False
 
 
-def _double_negation_ranges(text: str) -> list[tuple[int, int]]:
-    return [
-        (match.start(), match.end())
-        for match in _DOUBLE_NEGATION_NO_LAWYER_RE.finditer(text)
-    ]
-
-
-def _is_in_double_negation(index: int, ranges: list[tuple[int, int]]) -> bool:
-    return any(start <= index < end for start, end in ranges)
-
-
 def has_no_lawyer_risk(text: str) -> bool:
-    """Detect NO_LAWYER without treating double negation as a risk."""
-    ranges = _double_negation_ranges(text)
-    for keyword in LAW_RISK_RULES[LawRiskFlag.NO_LAWYER]:
-        index = text.find(keyword)
-        while index != -1:
-            if not _is_in_double_negation(index, ranges):
-                return True
-            index = text.find(keyword, index + 1)
+    """Detect NO_LAWYER with clause boundaries, double negation and positive override."""
+    clauses = _clauses(text)
+    if any(_POSITIVE_LAWYER_RE.search(clause) for clause in clauses):
+        return False
+    for clause in clauses:
+        if _DOUBLE_NEGATION_NO_LAWYER_RE.search(clause):
+            continue
+        if any(keyword in clause for keyword in LAW_RISK_RULES[LawRiskFlag.NO_LAWYER]):
+            return True
     return False
 
 
 def has_double_negated_no_lawyer(text: str) -> bool:
     """Return True when an explicit double negation makes NO_LAWYER false."""
-    return bool(_DOUBLE_NEGATION_NO_LAWYER_RE.search(text))
+    return any(_DOUBLE_NEGATION_NO_LAWYER_RE.search(clause) for clause in _clauses(text))
 
 
 def detect_law_risk_flags(message: str) -> List[LawRiskFlag]:
@@ -541,7 +571,7 @@ class LawEntityExtractor:
             return ["no"]
         if has_double_negated_no_lawyer(text):
             return ["yes"]
-        if any(item in text for item in ("有律师", "已委托律师", "委托了律师", "我的律师", "聘请了律师")):
+        if _POSITIVE_LAWYER_RE.search(text):
             return ["yes"]
         return ["unknown"]
     @staticmethod

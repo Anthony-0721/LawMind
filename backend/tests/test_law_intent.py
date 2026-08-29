@@ -264,3 +264,53 @@ def test_self_negated_accident_does_not_raise_traffic_risk():
     result = make_law_recognizer().recognize_sync("本人没有发生事故")
 
     assert LawRiskFlag.TRAFFIC_ACCIDENT not in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    ("message", "risk_flag"),
+    [
+        ("工伤事故", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("无事故", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("事故没有发生", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("交通事故没有发生", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("未受伤", LawRiskFlag.INJURY),
+        ("尚未立案", LawRiskFlag.FILED),
+    ],
+)
+def test_third_review_negation_and_domain_scope_are_not_traffic(message, risk_flag):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert risk_flag not in result.risk_flags
+
+
+def test_unlicensed_driving_final_intent_is_dangerous_driving():
+    result = make_law_recognizer().recognize_sync("无证驾驶发生交通事故")
+
+    assert result.intent == LawIntent.DANGEROUS_DRIVING
+    assert LawRiskFlag.TRAFFIC_ACCIDENT in result.risk_flags
+    assert result.entities["traffic_accident"] == ["yes"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "并不是没请律师",
+        "不是没请律师",
+        "并非未委托律师",
+    ],
+)
+def test_third_review_double_negative_lawyer_forms_do_not_trigger(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.NO_LAWYER not in result.risk_flags
+    assert result.urgency == UrgencyLevel.MEDIUM
+
+
+def test_later_positive_lawyer_clause_overrides_earlier_negative_clause():
+    result = make_law_recognizer().recognize_sync(
+        "没有律师，但是我已经委托了律师"
+    )
+
+    assert LawRiskFlag.NO_LAWYER not in result.risk_flags
+    assert result.urgency == UrgencyLevel.MEDIUM
+    assert result.entities["has_lawyer"] == ["yes"]
