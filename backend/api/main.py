@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI):
     print(BANNER, flush=True)
 
     from agents.agent_orchestrator import AgentOrchestrator, Request, build_shared_rag_tools
-    from core.intent_recognizer import IntentRecognizer
+    from core.intent_recognizer import LawIntentRecognizer
     from evaluation.evaluator import EndToEndEvaluator
     from mcp.knowledge_base import KnowledgeBase
     from mcp.tool_manager import MCPToolManager, Tool
@@ -83,9 +83,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"模型: {cfg['model']}  base_url: {cfg.get('base_url', '(官方)')}")
 
     # 意图识别器（Orchestrator 内部也会创建，这里单独暴露给 Evaluator）
-    recognizer = IntentRecognizer(
+    recognizer = LawIntentRecognizer(
         api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
         model=cfg["model"],
     )
 
@@ -305,6 +304,7 @@ async def chat(req: ChatRequest):
         intent=intent_result.intent,
         intent_group=intent_result.intent_group,
         urgency=intent_result.urgency,
+        risk_flags=intent_result.risk_flags,
         intent_confidence=intent_result.confidence,
     )
 
