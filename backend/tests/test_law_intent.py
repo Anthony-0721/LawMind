@@ -426,3 +426,69 @@ def test_hotfix_precise_event_negations_still_suppress(message, risk_flag):
     result = make_law_recognizer().recognize_sync(message)
 
     assert risk_flag not in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "没有请假",
+        "没有请别人",
+        "并不是没有请",
+        "没请假",
+        "没请别人",
+        "未请假",
+        "未请别人",
+    ],
+)
+def test_hotfix2_no_lawyer_invite_context_avoids_overmatch(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.NO_LAWYER not in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "没有请发生交通事故",
+        "没请发生交通事故",
+        "未请发生交通事故",
+        "没有请律师",
+        "没请律师",
+    ],
+)
+def test_hotfix2_no_lawyer_invite_context_still_detects(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    ("message", "risk_flag"),
+    [
+        ("尚未委托律师发生交通事故", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("发生交通事故后尚未委托律师", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("尚未委托律师追尾", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("尚未委托律师死亡", LawRiskFlag.INJURY),
+    ],
+)
+def test_hotfix2_pending_no_lawyer_does_not_suppress_events(message, risk_flag):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert risk_flag in result.risk_flags
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    ("message", "risk_flag"),
+    [
+        ("尚未追尾", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("尚未撞车", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("尚未死亡", LawRiskFlag.INJURY),
+        ("尚未受理案件", LawRiskFlag.FILED),
+        ("尚未提起公诉", LawRiskFlag.PROSECUTION),
+    ],
+)
+def test_hotfix2_pending_event_negations_suppress_risk(message, risk_flag):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert risk_flag not in result.risk_flags

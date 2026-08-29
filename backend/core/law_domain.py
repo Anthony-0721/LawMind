@@ -254,7 +254,6 @@ LAW_PATTERN_PRIORITY: List[LawIntent] = [
 NO_LAWYER_PHRASES: tuple[str, ...] = (
     "没有律师",
     "没有请律师",
-    "没有请",
     "还没有律师",
     "还没有委托律师",
     "还没请律师",
@@ -262,10 +261,15 @@ NO_LAWYER_PHRASES: tuple[str, ...] = (
     "没有聘请律师",
     "未委托律师",
     "尚未委托律师",
+    "尚未委托",
+    "尚未请律师",
+    "尚未聘请律师",
     "没有代理人",
-    "没请",
-    "未请",
     "未委托",
+)
+
+_NO_LAWYER_INVITE_RE = re.compile(
+    r"(?:没有请|没请|未请)(?=律师|代理人|委托|聘请|发生|造成|构成|涉及|交通事故|案件|$)"
 )
 
 
@@ -338,12 +342,18 @@ EVENT_NEGATION_PHRASES = (
     "不涉及",
     "未受伤",
     "未立案",
+    "尚未",
     "尚未发生",
-    "尚未立案",
+    "尚未追尾",
+    "尚未撞车",
+    "尚未死亡",
     "尚未受伤",
     "尚未构成",
     "尚未造成",
     "尚未发现",
+    "尚未受理案件",
+    "尚未提起公诉",
+    "尚未立案",
     "未被",
     "无事故",
     "无交通事故",
@@ -361,8 +371,26 @@ _DOUBLE_NEGATION_NO_LAWYER_RE = re.compile(
     r"(?:并不是未委托|不是未委托|并未没有|并没有没有|并不是没有|不是没有|并非没有|并不是没请|不是没请|并非未委托)"
     r"(?:律师|请律师|委托律师|代理人|聘请律师|代理)"
 )
+_DOUBLE_NEGATION_NO_INVITE_PHRASES = (
+    "并不是没有请",
+    "不是没有请",
+    "并非没有请",
+    "并没有没有请",
+    "并未没有请",
+    "并不是没请",
+    "不是没请",
+    "并非没请",
+    "并不是未请",
+    "不是未请",
+    "并非未请",
+    "并没有未请",
+    "并未未请",
+)
 _POSITIVE_LAWYER_RE = re.compile(
     r"(?<!没)(?<!未)(?<!无)(?:有律师|已委托律师|委托了律师|我的律师|聘请了律师|已经委托了)"
+)
+_NO_LAWYER_PENDING_RE = re.compile(
+    r"尚未(?:委托(?:律师)?|请律师|聘请律师|委托代理人|请代理人)"
 )
 _NEGATION_SEARCH_BEFORE = 12
 _NEGATION_SEARCH_AFTER = 8
@@ -384,6 +412,13 @@ def _same_clause(
     return not _SCOPE_BREAK_RE.search(text[low:high])
 
 
+def _is_double_negated_no_lawyer_clause(clause: str) -> bool:
+    return (
+        _DOUBLE_NEGATION_NO_LAWYER_RE.search(clause) is not None
+        or any(phrase in clause for phrase in _DOUBLE_NEGATION_NO_INVITE_PHRASES)
+    )
+
+
 def _is_negated_at(text: str, keyword: str, index: int) -> bool:
     search_start = max(0, index - _NEGATION_SEARCH_BEFORE)
     search_end = min(len(text), index + len(keyword) + _NEGATION_SEARCH_AFTER)
@@ -393,6 +428,8 @@ def _is_negated_at(text: str, keyword: str, index: int) -> bool:
         phrase_start = search_start + match.start()
         phrase_end = search_start + match.end()
         if not _same_clause(text, phrase_start, phrase_end, index, keyword_end):
+            continue
+        if match.group() == "尚未" and _NO_LAWYER_PENDING_RE.match(text, phrase_start):
             continue
         if phrase_end >= index - 8 and phrase_start <= keyword_end + 8:
             return True
@@ -415,16 +452,18 @@ def has_no_lawyer_risk(text: str) -> bool:
     if any(_POSITIVE_LAWYER_RE.search(clause) for clause in clauses):
         return False
     for clause in clauses:
-        if _DOUBLE_NEGATION_NO_LAWYER_RE.search(clause):
+        if _is_double_negated_no_lawyer_clause(clause):
             continue
         if any(keyword in clause for keyword in NO_LAWYER_PHRASES):
+            return True
+        if _NO_LAWYER_INVITE_RE.search(clause):
             return True
     return False
 
 
 def has_double_negated_no_lawyer(text: str) -> bool:
     """Return True when an explicit double negation makes NO_LAWYER false."""
-    return any(_DOUBLE_NEGATION_NO_LAWYER_RE.search(clause) for clause in _clauses(text))
+    return any(_is_double_negated_no_lawyer_clause(clause) for clause in _clauses(text))
 
 
 def detect_law_risk_flags(message: str) -> List[LawRiskFlag]:
