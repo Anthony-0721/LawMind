@@ -432,8 +432,17 @@ def test_escalation_handle_calls_tools_and_creates_record_when_complete():
         def recommend(self, legal_domain):
             return [{"id": "lawyer-1", "legal_domain": legal_domain}]
 
+    class FakeConsultationService:
+        def save_from_agent(self, payload):
+            return {**payload, "id": "consultation-1"}
+
     client = FakeClient()
-    agent = EscalationAgent(client, "test-model", lawyer_service=FakeLawyerService())
+    agent = EscalationAgent(
+        client,
+        "test-model",
+        lawyer_service=FakeLawyerService(),
+        consultation_service=FakeConsultationService(),
+    )
     req = make_request(
         "我愿意留资并预约律师",
         intent=LawIntent.LAWYER_APPOINTMENT,

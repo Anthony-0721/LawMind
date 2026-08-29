@@ -272,7 +272,9 @@ class ConsultationRepository:
             return _record_to_dict(record)
 
         for key, value in self._model_fields(data).items():
-            if key == "status" and not value:
+            if key == "status":
+                # Status is a lifecycle field managed by staff; duplicate saves
+                # must never reset it back to PENDING/DRAFT.
                 continue
             setattr(existing, key, value)
         stored = self._commit_save(request_id)

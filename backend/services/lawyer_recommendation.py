@@ -1,12 +1,7 @@
-"""Lawyer recommendation and management service.
-
-Public service methods return normalized dictionaries with contact details
-removed by default. Callers that explicitly need staff contact information can
-pass ``include_contact=True``.
-"""
+"""Lawyer recommendation and management service with request-scoped persistence."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from db.common import RecordDict
 from db.lawyer_repository import LawyerRepository
@@ -44,19 +39,6 @@ LAW_SPECIALTY_TERMS: Dict[str, tuple[str, ...]] = {
     "civil_loan": ("民间借贷", "借款", "借贷", "债务", "欠款"),
 }
 
-_CONTACT_FIELDS = ("phone", "wechat", "email")
-
-
-def law_domain_to_lawyer_domain(value: Any) -> str:
-    """Map a legal intent or domain value to the canonical lawyer domain."""
-    raw = getattr(value, "value", value)
-    return LAW_DOMAIN_TO_LAWYER_DOMAIN.get(str(raw or "").strip(), "general")
-
-
-def _normalize_domain(value: Any) -> str:
-    return str(getattr(value, "value", value) or "").strip()
-
-
 _LAWYER_RECORD_KEYS = (
     "id",
     "name",
@@ -73,28 +55,42 @@ _LAWYER_RECORD_KEYS = (
 )
 
 
+class LawyerServiceError(Exception):
+    """Sanitized lawyer service failure without repository/PII details."""
+
+
+def law_domain_to_lawyer_domain(value: Any) -> str:
+    """Map a legal intent or domain value to the canonical lawyer domain."""
+    raw = getattr(value, "value", value)
+    return LAW_DOMAIN_TO_LAWYER_DOMAIN.get(str(raw or "").strip(), "general")
+
+
+def _normalize_domain(value: Any) -> str:
+    return str(getattr(value, "value", value) or "").strip()
+
+
 def _record_mapping(record: Any) -> Mapping[str, Any]:
     if isinstance(record, Mapping):
         return record
     return {key: getattr(record, key, None) for key in _LAWYER_RECORD_KEYS}
 
 
-def _public_record(
-    record: Mapping[str, Any],
-    include_contact: bool = False,
-) -> RecordDict:
-    """Return a normalized lawyer dict without default contact fields."""
-    record = _record_mapping(record)
-    result = RecordDict({key: value for key, value in record.items()})
-    if not include_contact:
-        for key in _CONTACT_FIELDS:
-            result.pop(key, None)
-    return result
+def _public_record(record: Any) -> RecordDict:
+    """Return only the public lawyer fields exposed to clients/agents."""
+    data = _record_mapping(record)
+    return RecordDict({
+        "id": data.get("id"),
+        "name": data.get("name"),
+        "specialties": list(data.get("specialties") or []),
+        "intro": data.get("intro"),
+    })
 
 
-def recommend_lawyers(repository: Any, intent: Any, limit: int = 3) -> List[Dict[str, Any]]:
-    """Plan-compatible helper that recommends active lawyers for an intent."""
-    return LawyerService(repository).recommend(intent, limit=limit)
+def _is_active(record: Mapping[str, Any]) -> bool:
+    value = record.get("active", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "否"}
+    return bool(value)
 
 
 def _specialties_match(record: Mapping[str, Any], terms: tuple[str, ...]) -> bool:
@@ -103,11 +99,86 @@ def _specialties_match(record: Mapping[str, Any], terms: tuple[str, ...]) -> boo
     return any(term.lower() in text for term in terms)
 
 
+def _recommend_with_repository(
+    repository: Any,
+    domain: Any,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """Recommend active lawyers from a repository, strictly specialty-matched."""
+    exact_domain = _normalize_domain(domain)
+    mapped_domain = law_domain_to_lawyer_domain(exact_domain)
+    domains_to_try = list(dict.fromkeys([exact_domain, mapped_domain]))
+    terms = LAW_SPECIALTY_TERMS.get(exact_domain, ())
+    finder = getattr(repository, "find_active_by_domain", None)
+
+    candidates: List[Dict[str, Any]] = []
+    for candidate_domain in domains_to_try:
+        if not candidate_domain:
+            continue
+        if callable(finder):
+            matches = finder(candidate_domain)
+        else:
+            recommender = getattr(repository, "recommend", None)
+            if not callable(recommender):
+                continue
+            try:
+                matches = recommender(candidate_domain, limit=1000)
+            except TypeError:
+                matches = recommender(candidate_domain)
+        if not matches:
+            continue
+        matches = [
+            item for item in matches
+            if _is_active(_record_mapping(item))
+        ]
+        if not matches:
+            continue
+        if terms:
+            matched = [
+                item for item in matches
+                if _specialties_match(item, terms)
+            ]
+            if matched:
+                candidates.extend(matched)
+                break
+            continue
+        candidates.extend(matches)
+        break
+
+    candidates.sort(key=lambda item: int(item.get("sort_order") or 0))
+    try:
+        safe_limit = max(0, int(limit or 0))
+    except (TypeError, ValueError):
+        safe_limit = 3
+    return [_public_record(item) for item in candidates[:safe_limit]]
+
+
+def recommend_lawyers(
+    repository_or_factory: Any,
+    intent: Any,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """Plan-compatible helper backed by the request-scoped service."""
+    if callable(repository_or_factory):
+        return LawyerService(repository_or_factory).recommend(intent, limit=limit)
+    try:
+        return _recommend_with_repository(repository_or_factory, intent, limit)
+    except Exception:
+        raise LawyerServiceError("lawyer recommendation failed") from None
+
+
 class LawyerService:
     """Application service for lawyer recommendation and management."""
 
-    def __init__(self, lawyer_repository: LawyerRepository):
-        self.lawyer_repository = lawyer_repository
+    def __init__(self, session_factory: Callable[[], Any]):
+        self.session_factory = session_factory
+
+    def _run(self, operation: Callable[[LawyerRepository], Any], error: str) -> Any:
+        try:
+            with self.session_factory() as session:
+                return operation(LawyerRepository(session))
+        except Exception:
+            raise LawyerServiceError(error) from None
 
     def recommend(
         self,
@@ -115,96 +186,52 @@ class LawyerService:
         limit: int = 3,
         include_contact: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Return up to ``limit`` active lawyers for an exact or mapped domain."""
-        exact_domain = _normalize_domain(domain)
-        mapped_domain = law_domain_to_lawyer_domain(exact_domain)
-        domains_to_try = list(dict.fromkeys([
-            exact_domain,
-            mapped_domain,
-            "general",
-        ]))
-
-        candidates: List[Dict[str, Any]] = []
-        terms = LAW_SPECIALTY_TERMS.get(exact_domain, ())
-        finder = getattr(self.lawyer_repository, "find_active_by_domain", None)
-        for candidate_domain in domains_to_try:
-            if not candidate_domain:
-                continue
-            if callable(finder):
-                matches = finder(candidate_domain)
-            else:
-                recommender = getattr(self.lawyer_repository, "recommend", None)
-                if not callable(recommender):
-                    matches = []
-                else:
-                    try:
-                        matches = recommender(candidate_domain, limit=1000)
-                    except TypeError:
-                        matches = recommender(candidate_domain)
-            if not matches:
-                continue
-            if terms and candidate_domain != "general":
-                matched = [
-                    item for item in matches
-                    if _specialties_match(item, terms)
-                ]
-                if matched:
-                    candidates.extend(matched)
-                    break
-                continue
-            candidates.extend(matches)
-            break
-
-        candidates.sort(
-            key=lambda item: (
-                int(item.get("sort_order") or 0),
-                str(item.get("created_at") or ""),
-            )
+        del include_contact
+        return self._run(
+            lambda repository: _recommend_with_repository(repository, domain, limit),
+            "lawyer recommendation failed",
         )
-        try:
-            safe_limit = max(0, int(limit or 0))
-        except (TypeError, ValueError):
-            safe_limit = 3
-        if safe_limit <= 0:
-            return []
-        return [
-            _public_record(item, include_contact=include_contact)
-            for item in candidates[:safe_limit]
-        ]
 
     def find_active_by_domain(
         self,
         domain: Any,
         include_contact: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Return public, active lawyer records for a domain."""
-        raw_domain = _normalize_domain(domain)
-        return [
-            _public_record(item, include_contact=include_contact)
-            for item in self.lawyer_repository.find_active_by_domain(raw_domain)
-        ]
+        del include_contact
+        return self._run(
+            lambda repository: [
+                _public_record(item)
+                for item in repository.find_active_by_domain(_normalize_domain(domain))
+                if _is_active(_record_mapping(item))
+            ],
+            "lawyer lookup failed",
+        )
 
-    def get_by_id(
-        self,
-        lawyer_id: str,
-        include_contact: bool = False,
-    ) -> Optional[Dict[str, Any]]:
-        """Return one lawyer with contact details redacted by default."""
-        record = self.lawyer_repository.get_by_id(str(lawyer_id))
-        if record is None:
-            return None
-        return _public_record(record, include_contact=include_contact)
+    def get_by_id(self, lawyer_id: str, include_contact: bool = False) -> Optional[Dict[str, Any]]:
+        del include_contact
+
+        def lookup(repository: LawyerRepository) -> Optional[Dict[str, Any]]:
+            record = repository.get_by_id(str(lawyer_id))
+            return _public_record(record) if record is not None else None
+
+        return self._run(lookup, "lawyer lookup failed")
 
     def list_all(
         self,
         active_only: bool = True,
         include_contact: bool = False,
     ) -> List[Dict[str, Any]]:
-        """List lawyers with contact details redacted by default."""
-        return [
-            _public_record(item, include_contact=include_contact)
-            for item in self.lawyer_repository.list_all(active_only=active_only)
-        ]
+        del include_contact
+        def list_records(repository: LawyerRepository) -> List[Dict[str, Any]]:
+            records = repository.list_all(active_only=active_only)
+            if active_only:
+                records = [
+                    item for item in records
+                    if _is_active(_record_mapping(item))
+                ]
+            return [_public_record(item) for item in records]
+
+        return self._run(list_records, "lawyer lookup failed")
 
     def create(
         self,
@@ -212,9 +239,11 @@ class LawyerService:
         include_contact: bool = False,
         **fields: Any,
     ) -> Dict[str, Any]:
-        """Create a lawyer profile and return its public representation."""
-        record = self.lawyer_repository.create(payload, **fields)
-        return _public_record(record, include_contact=include_contact)
+        del include_contact
+        return self._run(
+            lambda repository: _public_record(repository.create(payload, **fields)),
+            "lawyer create failed",
+        )
 
     def update(
         self,
@@ -223,11 +252,13 @@ class LawyerService:
         include_contact: bool = False,
         **fields: Any,
     ) -> Optional[Dict[str, Any]]:
-        """Update a lawyer profile and return its public representation."""
-        record = self.lawyer_repository.update(str(lawyer_id), payload, **fields)
-        if record is None:
-            return None
-        return _public_record(record, include_contact=include_contact)
+        del include_contact
+
+        def apply(repository: LawyerRepository) -> Optional[Dict[str, Any]]:
+            record = repository.update(str(lawyer_id), payload, **fields)
+            return _public_record(record) if record is not None else None
+
+        return self._run(apply, "lawyer update failed")
 
     def toggle(
         self,
@@ -235,18 +266,21 @@ class LawyerService:
         active: Optional[bool] = None,
         include_contact: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """Toggle or set active state and return the public representation."""
-        record = self.lawyer_repository.toggle(str(lawyer_id), active)
-        if record is None:
-            return None
-        return _public_record(record, include_contact=include_contact)
+        del include_contact
+
+        def apply(repository: LawyerRepository) -> Optional[Dict[str, Any]]:
+            record = repository.toggle(str(lawyer_id), active)
+            return _public_record(record) if record is not None else None
+
+        return self._run(apply, "lawyer update failed")
 
 
 __all__ = [
-    "LAW_SPECIALTY_TERMS",
     "LAW_DOMAIN_TO_LAWYER",
     "LAW_DOMAIN_TO_LAWYER_DOMAIN",
+    "LAW_SPECIALTY_TERMS",
     "LawyerService",
+    "LawyerServiceError",
     "law_domain_to_lawyer_domain",
     "recommend_lawyers",
 ]

@@ -560,9 +560,17 @@ def validate_contact(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _as_bool(value: Any) -> bool:
-    """Convert boolean-like tool input to a real bool."""
+    """Convert boolean-like tool input to a real bool.
+
+    Chinese consent values are supported: true for 是/同意/愿意 and false for
+    否/不同意/不愿意.
+    """
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "是"}
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "是", "同意", "愿意"}:
+            return True
+        if normalized in {"0", "false", "no", "否", "不同意", "不愿意"}:
+            return False
     return bool(value)
 
 
@@ -591,6 +599,14 @@ def create_consultation_record(
         and hasattr(consultation_service, "recommend")
     ):
         consultation_service, lawyer_service = lawyer_service, consultation_service
+
+    if consultation_service is None:
+        return {
+            "success": False,
+            "persisted": False,
+            "status": "DRAFT",
+            "error": "consultation_service_unavailable",
+        }
 
     raw_lawyers = args.get("recommended_lawyers") or []
     recommended_lawyers = (

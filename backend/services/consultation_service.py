@@ -1,13 +1,8 @@
-"""Consultation persistence and validation service.
-
-The service enforces the contact/consent rules before delegating to
-``ConsultationRepository``. All service-level failures are sanitized and never
-bind request payloads or PII.
-"""
+"""Consultation persistence and validation service with request-scoped sessions."""
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from db.consultation_repository import (
@@ -16,6 +11,9 @@ from db.consultation_repository import (
 )
 
 _CHINESE_MOBILE_RE = re.compile(r"^1[3-9]\d{9}$")
+_VALID_STATUSES = frozenset({"PENDING", "CONTACTED", "BOOKED", "CLOSED"})
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "是", "同意", "愿意"})
+_FALSE_TOKENS = frozenset({"0", "false", "no", "否", "不同意", "不愿意"})
 
 
 class ConsultationServiceError(ConsultationStoreError):
@@ -23,12 +21,16 @@ class ConsultationServiceError(ConsultationStoreError):
 
 
 class ConsultationValidationError(ConsultationServiceError):
-    """Raised when a public consultation payload is incomplete or invalid."""
+    """Raised when a consultation payload, consent, or status is invalid."""
 
 
 def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "是", "同意"}
+        normalized = value.strip().lower()
+        if normalized in _TRUE_TOKENS:
+            return True
+        if normalized in _FALSE_TOKENS:
+            return False
     return bool(value)
 
 
@@ -45,20 +47,16 @@ def _contact_value(payload: Mapping[str, Any], key: str) -> str:
 
 
 def _normalize_contact(payload: Mapping[str, Any]) -> Dict[str, str]:
-    name = (
-        _contact_value(payload, "name")
-        or _contact_value(payload, "contact_name")
-    )
-    phone = (
-        _contact_value(payload, "phone")
-        or _contact_value(payload, "contact_phone")
-    )
+    name = _contact_value(payload, "name") or _contact_value(payload, "contact_name")
+    phone = _contact_value(payload, "phone") or _contact_value(payload, "contact_phone")
     return {"name": name, "phone": phone}
 
 
 def _contact_valid(payload: Mapping[str, Any]) -> bool:
     contact = _normalize_contact(payload)
-    return bool(contact["name"]) and bool(_CHINESE_MOBILE_RE.fullmatch(contact["phone"]))
+    return bool(contact["name"]) and bool(
+        _CHINESE_MOBILE_RE.fullmatch(contact["phone"])
+    )
 
 
 def _consent(payload: Mapping[str, Any]) -> bool:
@@ -119,8 +117,21 @@ def _draft_record(payload: Mapping[str, Any], source: str) -> Dict[str, Any]:
 class ConsultationService:
     """Business rules and safe delegation for consultation/lead records."""
 
-    def __init__(self, consultation_repository: ConsultationRepository):
-        self.consultation_repository = consultation_repository
+    def __init__(self, session_factory: Callable[[], Any]):
+        self.session_factory = session_factory
+
+    def _run(
+        self,
+        operation: Callable[[ConsultationRepository], Any],
+        error_message: str,
+    ) -> Any:
+        try:
+            with self.session_factory() as session:
+                return operation(ConsultationRepository(session))
+        except ConsultationValidationError:
+            raise
+        except Exception:
+            raise ConsultationServiceError(error_message) from None
 
     def save_from_agent(
         self,
@@ -131,28 +142,30 @@ class ConsultationService:
         data = _payload_dict(payload)
         if args:
             data.update(dict(args))
-        data.setdefault("source", "law_agent")
-        if not _contact_valid(data) or not _consent(data):
-            return _draft_record(data, "law_agent")
-        data["status"] = "PENDING"
-        try:
-            return self.consultation_repository.save_from_agent(data)
-        except Exception:
-            raise ConsultationServiceError("consultation save failed") from None
+        data["source"] = "law_agent"
+
+        def save(repository: ConsultationRepository) -> Dict[str, Any]:
+            if not _contact_valid(data) or not _consent(data):
+                return _draft_record(data, "law_agent")
+            data["status"] = "PENDING"
+            return repository.save_from_agent(data)
+
+        return self._run(save, "consultation save failed")
 
     def save_public(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
         """Persist only publicly submitted records with valid contact/consent."""
         data = dict(payload or {})
-        data.setdefault("source", "public")
-        if not _contact_valid(data) or not _consent(data):
-            raise ConsultationValidationError(
-                "public consultation requires valid contact and consent"
-            )
-        data["status"] = "PENDING"
-        try:
-            return self.consultation_repository.save_public(data)
-        except Exception:
-            raise ConsultationServiceError("consultation save failed") from None
+        data["source"] = "public"
+
+        def save(repository: ConsultationRepository) -> Dict[str, Any]:
+            if not _contact_valid(data) or not _consent(data):
+                raise ConsultationValidationError(
+                    "public consultation requires valid contact and consent"
+                )
+            data["status"] = "PENDING"
+            return repository.save_public(data)
+
+        return self._run(save, "consultation save failed")
 
     def save_sync(
         self,
@@ -165,38 +178,43 @@ class ConsultationService:
         return self.save_public(data)
 
     def get_by_id(self, record_id: str) -> Optional[Dict[str, Any]]:
-        try:
-            return self.consultation_repository.get_by_id(str(record_id))
-        except Exception:
-            raise ConsultationServiceError("consultation read failed") from None
+        return self._run(
+            lambda repository: repository.get_by_id(str(record_id)),
+            "consultation read failed",
+        )
 
     def get_by_request_id(self, request_id: str) -> Optional[Dict[str, Any]]:
-        try:
-            return self.consultation_repository.get_by_request_id(str(request_id))
-        except Exception:
-            raise ConsultationServiceError("consultation read failed") from None
+        return self._run(
+            lambda repository: repository.get_by_request_id(str(request_id)),
+            "consultation read failed",
+        )
 
     def list_recent(self, limit: int = 50) -> List[Dict[str, Any]]:
-        try:
-            return self.consultation_repository.list_recent(limit)
-        except Exception:
-            raise ConsultationServiceError("consultation read failed") from None
+        return self._run(
+            lambda repository: repository.list_recent(limit),
+            "consultation read failed",
+        )
 
     def update_status(
         self,
         record_id: str,
         status: str,
     ) -> Optional[Dict[str, Any]]:
-        try:
-            return self.consultation_repository.update_status(str(record_id), str(status))
-        except Exception:
-            raise ConsultationServiceError("consultation update failed") from None
+        raw_status = str(status or "")
+
+        def apply(repository: ConsultationRepository) -> Optional[Dict[str, Any]]:
+            normalized = raw_status.strip().upper()
+            if normalized not in _VALID_STATUSES:
+                raise ConsultationValidationError("invalid consultation status")
+            return repository.update_status(str(record_id), normalized)
+
+        return self._run(apply, "consultation update failed")
 
     def delete(self, record_id: str) -> bool:
-        try:
-            return self.consultation_repository.delete(str(record_id))
-        except Exception:
-            raise ConsultationServiceError("consultation delete failed") from None
+        return self._run(
+            lambda repository: repository.delete(str(record_id)),
+            "consultation delete failed",
+        )
 
 
 __all__ = [

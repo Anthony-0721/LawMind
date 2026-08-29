@@ -93,6 +93,24 @@ def test_consultation_save_from_agent_and_idempotent_request_id(session):
     assert len(repo.list_recent(100)) == 1
 
 
+def test_consultation_duplicate_request_id_preserves_status(session):
+    repo = ConsultationRepository(session)
+    payload = {
+        "request_id": "req-status-preserve",
+        "contact_name": "张*",
+        "contact_phone": "13800138000",
+        "consent": True,
+        "legal_domain": "dangerous_driving",
+    }
+    first = repo.save_public(payload)
+    repo.update_status(first["id"], "CONTACTED")
+
+    second = repo.save_public({**payload, "status": "PENDING"})
+
+    assert second["id"] == first["id"]
+    assert second["status"] == "CONTACTED"
+
+
 def test_consultation_request_id_is_unique_at_database_level(session):
     request_id = f"req-{uuid.uuid4()}"
     consultation = Consultation(

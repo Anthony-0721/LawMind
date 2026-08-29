@@ -101,7 +101,7 @@ class LawyerRepository:
         records = self.session.scalars(
             select(Lawyer)
             .where(Lawyer.domain == str(domain), Lawyer.active.is_(True))
-            .order_by(Lawyer.sort_order.asc(), Lawyer.created_at.asc())
+            .order_by(Lawyer.sort_order.asc())
         ).all()
         return [_record_to_dict(record) for record in records]
 
@@ -113,7 +113,6 @@ class LawyerRepository:
         statement = select(Lawyer).order_by(
             Lawyer.sort_order.asc(),
             Lawyer.domain.asc(),
-            Lawyer.created_at.asc(),
         )
         if active_only:
             statement = statement.where(Lawyer.active.is_(True))

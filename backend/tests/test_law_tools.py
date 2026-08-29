@@ -41,6 +41,13 @@ from core.intent_recognizer import UrgencyLevel
 from core.law_domain import LawIntent, LawRiskFlag
 
 
+class FakeConsultationService:
+    """Fake persistence used when a tool contract needs a real service path."""
+
+    def save_from_agent(self, payload):
+        return dict(payload)
+
+
 class FakeClient:
     """Fake Anthropic client; Agent construction/whitelists must not call it."""
 
@@ -293,6 +300,7 @@ def test_create_consultation_record_draft_contract():
             "city": "上海",
             "preferred_time": "2026-09-01 10:00",
         },
+        consultation_service=FakeConsultationService(),
     )
 
     assert draft["request_id"] == "req-123"
@@ -385,13 +393,19 @@ def test_consultation_draft_status_requires_contact_and_consent():
     req = make_request(intent=LawIntent.DANGEROUS_DRIVING)
     valid_contact = {"contact": {"name": "张三", "phone": "13800138000"}}
 
-    no_consent = create_consultation_record(req, {**valid_contact, "consent": False})
+    no_consent = create_consultation_record(
+        req, {**valid_contact, "consent": False}, consultation_service=FakeConsultationService()
+    )
     assert no_consent["status"] == "DRAFT"
 
-    invalid_contact = create_consultation_record(req, {"consent": True})
+    invalid_contact = create_consultation_record(
+        req, {"consent": True}, consultation_service=FakeConsultationService()
+    )
     assert invalid_contact["status"] == "DRAFT"
 
-    pending = create_consultation_record(req, {**valid_contact, "consent": True})
+    pending = create_consultation_record(
+        req, {**valid_contact, "consent": True}, consultation_service=FakeConsultationService()
+    )
     assert pending["status"] == "PENDING"
 
 
@@ -469,13 +483,18 @@ def test_contract_intents_are_plain_strings():
     assert type(identify_legal_domain(req, {})["intent"]) is str
     assert type(build_reception_summary(req, {})["intent"]) is str
     assert type(build_handoff_summary(req, {})["intent"]) is str
-    assert type(create_consultation_record(req, {})["legal_domain"]) is str
+    result = create_consultation_record(
+        req, {}, consultation_service=FakeConsultationService()
+    )
+    assert type(result["legal_domain"]) is str
 
 
 def test_create_consultation_record_uses_args_legal_domain():
     req = make_request(intent=LawIntent.DANGEROUS_DRIVING)
 
-    draft = create_consultation_record(req, {"legal_domain": "civil"})
+    draft = create_consultation_record(
+        req, {"legal_domain": "civil"}, consultation_service=FakeConsultationService()
+    )
 
     assert draft["legal_domain"] == "civil"
     assert type(draft["legal_domain"]) is str
@@ -528,7 +547,9 @@ def test_legal_domain_args_override_entities_in_resolver_recommend_and_record():
     assert service.seen == "civil"
     assert recommendation == [{"legal_domain": "civil"}]
 
-    draft = create_consultation_record(req, {"legal_domain": "civil"})
+    draft = create_consultation_record(
+        req, {"legal_domain": "civil"}, consultation_service=FakeConsultationService()
+    )
     assert draft["legal_domain"] == "civil"
 
 
