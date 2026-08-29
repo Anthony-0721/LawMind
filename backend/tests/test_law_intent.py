@@ -205,7 +205,7 @@ def test_law_pattern_data_covers_all_enum_domains():
 
 
 def test_brief_requires_traffic_compensation_and_no_lawyer_abbreviation():
-    assert "赔偿" in LAW_TEMPLATES[LawIntent.TRAFFIC_ACCIDENT]
+    assert "交通事故" in LAW_TEMPLATES[LawIntent.TRAFFIC_ACCIDENT]
     assert "没请律师" in LAW_RISK_RULES[LawRiskFlag.NO_LAWYER]
 
 
@@ -314,3 +314,29 @@ def test_later_positive_lawyer_clause_overrides_earlier_negative_clause():
     assert LawRiskFlag.NO_LAWYER not in result.risk_flags
     assert result.urgency == UrgencyLevel.MEDIUM
     assert result.entities["has_lawyer"] == ["yes"]
+
+
+def test_production_safety_incident_assessment_is_not_traffic_risk():
+    result = make_law_recognizer().recognize_sync("生产安全事故认定")
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT not in result.risk_flags
+
+
+def test_production_safety_responsibility_is_not_traffic_intent():
+    result = make_law_recognizer().recognize_sync("生产安全事故责任认定")
+
+    assert result.intent != LawIntent.TRAFFIC_ACCIDENT
+
+
+@pytest.mark.parametrize(
+    ("message", "risk_flag"),
+    [
+        ("对方受伤不轻", LawRiskFlag.INJURY),
+        ("法院已经立案不能拖", LawRiskFlag.FILED),
+        ("刚刚发生交通事故没有大碍", LawRiskFlag.TRAFFIC_ACCIDENT),
+    ],
+)
+def test_positive_events_are_not_suppressed_by_generic_markers(message, risk_flag):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert risk_flag in result.risk_flags

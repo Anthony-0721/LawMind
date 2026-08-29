@@ -113,13 +113,10 @@ LAW_TEMPLATES: Dict[LawIntent, List[str]] = {
     LawIntent.TRAFFIC_ACCIDENT: [
         "交通事故",
         "车祸",
-        "行人受伤",
-        "车辆相撞",
-        "责任认定",
-        "追尾",
         "交通肇事",
-        "赔偿",
-        "保险理赔",
+        "撞车",
+        "车辆相撞",
+        "行人受伤",
     ],
     LawIntent.CIVIL_LOAN: [
         "民间借贷",
@@ -199,15 +196,10 @@ LAW_PATTERNS: Dict[LawIntent, List[str]] = {
     LawIntent.TRAFFIC_ACCIDENT: [
         "交通事故",
         "车祸",
-        "行人受伤",
-        "车辆相撞",
-        "责任认定",
-        "撞车",
-        "追尾",
         "交通肇事",
-        "赔偿",
-        "事故认定",
-        "保险理赔",
+        "撞车",
+        "车辆相撞",
+        "行人受伤",
     ],
     LawIntent.CIVIL_LOAN: [
         "民间借贷",
@@ -282,13 +274,10 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
     LawRiskFlag.TRAFFIC_ACCIDENT: [
         "交通事故",
         "车祸",
-        "行人受伤",
-        "车辆相撞",
-        "撞车",
-        "追尾",
         "交通肇事",
-        "事故认定",
-        "肇事逃逸",
+        "撞车",
+        "车辆相撞",
+        "行人受伤",
     ],
     LawRiskFlag.FILED: [
         "立案",
@@ -317,38 +306,36 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
 
 
 _NEGATION_PHRASES = (
-    "尚未立案",
     "未受伤",
-    "无事故",
-    "无交通事故",
-    "没请",
-    "未请",
-    "未委托",
-    "并不是没有",
-    "不是没有",
-    "并没有",
-    "并未",
-    "没有发生",
     "未发生",
     "未构成",
     "未造成",
     "未发现",
+    "未立案",
+    "尚未",
     "未被",
-    "没有",
-    "并无",
-    "并非",
-    "不是",
-    "并不",
-    "不涉及",
-    "不",
-    "没",
+    "无事故",
+    "无交通事故",
+    "没有发生",
+    "没有交通事故",
+    "没有律师",
+    "没有请",
+    "未请",
+    "未委托",
+    "没请",
+    "没发生",
+    # Explicit compatibility phrases for previously required short cases.
+    "没有被",
+    "没有受伤",
+    "没有立案",
+    "不紧急",
 )
 _NEGATION_SCOPE_RE = re.compile("|".join(re.escape(p) for p in _NEGATION_PHRASES))
 _SCOPE_BREAK_RE = re.compile(
     r"但是|不过|然而|但|而|[。！？；，,;!？]"
 )
 _DOUBLE_NEGATION_NO_LAWYER_RE = re.compile(
-    r"(?:并不是没请|不是没请|并非未委托|并不是没有|不是没有|并非没有|并不是未|不是未|并未没有|并没有没有)"
+    r"(?:并不是没有|不是没有|并非没有|并不是没请|不是没请|并非未委托)"
     r"(?:律师|请律师|委托律师|代理人|聘请律师|代理)"
 )
 _POSITIVE_LAWYER_RE = re.compile(
