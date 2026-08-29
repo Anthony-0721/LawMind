@@ -59,13 +59,20 @@ def make_faq(
 class FakeKnowledgeBase:
     """Stores vectors in memory and records synchronization calls."""
 
-    def __init__(self, *, fail_add: bool = False, fail_delete: bool = False):
+    def __init__(
+        self,
+        *,
+        fail_add: bool = False,
+        fail_delete: bool = False,
+        fail_faq_delete: bool = False,
+    ):
         self.documents: Dict[str, Dict[str, Any]] = {}
         self.delete_calls: List[Dict[str, Any]] = []
         self.add_calls: List[Dict[str, Any]] = []
         self.faq_vector_delete_calls: List[int] = []
         self.fail_add = fail_add
         self.fail_delete = fail_delete
+        self.fail_faq_delete = fail_faq_delete
 
     def delete_by_metadata(self, where: Dict[str, Any]) -> int:
         self.delete_calls.append(dict(where))
@@ -82,7 +89,7 @@ class FakeKnowledgeBase:
 
     def delete_faq_vectors(self) -> int:
         self.faq_vector_delete_calls.append(1)
-        if self.fail_delete:
+        if self.fail_faq_delete:
             raise RuntimeError("faq vector cleanup failed")
         before = len(self.documents)
         for doc_id in list(self.documents):
@@ -298,6 +305,7 @@ def test_create_faq_sync_active_adds_document_with_metadata():
         "keywords": ["醉驾"],
         "active": True,
         "source": "law_firm",
+        "doc_type": "faq",
         "version": 1,
     }
     assert repo.marked_synced == [("faq-1", 1)]
@@ -697,7 +705,11 @@ def test_delete_record_is_retry_safe_when_db_row_is_already_missing():
 
     result = service.delete_record("missing")
 
-    assert result == {"success": True, "faq_id": "missing", "action": "delete"}
+    assert result == {
+        "success": False,
+        "faq_id": "missing",
+        "error": "faq_db_delete_failed",
+    }
     assert repo.delete_calls == ["missing"]
     assert kb.documents == {}
 
@@ -711,6 +723,116 @@ def test_delete_record_fails_only_when_chroma_cleanup_fails():
 
     assert result == {"success": False, "error": "faq_sync_delete_failed"}
     assert repo.delete_calls == ["missing"]
+
+
+def test_update_read_failure_returns_faq_update_failed():
+    repo = FakeFaqRepository([make_faq()])
+    kb = FakeKnowledgeBase()
+    service = FaqSyncService(repo, kb)
+
+    def fail_getter(faq_id):
+        raise RuntimeError("db read failed 张三 13800138000")
+
+    repo.get_by_id = fail_getter
+    result = service.update_record("faq-1", {"question": "问题"})
+
+    assert result == {"success": False, "error": "faq_update_failed"}
+    assert repo.update_calls == []
+
+
+def test_update_write_failure_returns_faq_update_failed():
+    repo = FakeFaqRepository([make_faq()])
+    kb = FakeKnowledgeBase()
+    service = FaqSyncService(repo, kb)
+
+    def fail_update(faq_id, payload):
+        raise RuntimeError("db write failed")
+
+    repo.update = fail_update
+    result = service.update_record("faq-1", {"question": "问题"})
+
+    assert result == {"success": False, "error": "faq_update_failed"}
+    assert repo.update_calls == []
+
+
+def test_delete_repo_exception_still_cleans_and_returns_db_failure():
+    repo = FakeFaqRepository([make_faq()])
+    kb = FakeKnowledgeBase()
+    kb.documents["faq:faq-1"] = {
+        "content": "旧向量",
+        "metadata": {"faq_id": "faq-1", "doc_type": "faq"},
+    }
+    service = FaqSyncService(repo, kb)
+
+    def fail_delete(faq_id):
+        raise RuntimeError("db delete failed")
+
+    repo.delete = fail_delete
+    result = service.delete_record("faq-1")
+
+    assert result == {
+        "success": False,
+        "faq_id": "faq-1",
+        "error": "faq_db_delete_failed",
+    }
+    assert kb.documents == {}
+
+
+def test_delete_repo_exception_with_chroma_failure_returns_sync_failure():
+    repo = FakeFaqRepository([make_faq()])
+    kb = FakeKnowledgeBase(fail_delete=True)
+    service = FaqSyncService(repo, kb)
+
+    def fail_delete(faq_id):
+        raise RuntimeError("db delete failed")
+
+    repo.delete = fail_delete
+    result = service.delete_record("faq-1")
+
+    assert result == {"success": False, "error": "faq_sync_delete_failed"}
+
+
+def test_bootstrap_cleanup_failure_continues(monkeypatch):
+    faq_items = [{
+        "category": "criminal",
+        "question": "清理失败仍同步",
+        "answer": "答案",
+        "keywords": [],
+        "active": True,
+    }]
+    lawyer_items = []
+
+    def fake_load_seed(path: Any) -> List[Dict[str, Any]]:
+        return faq_items if "faq" in str(path).lower() else lawyer_items
+
+    monkeypatch.setattr(bootstrap_module, "_load_seed", fake_load_seed)
+    monkeypatch.setattr(bootstrap_module, "init_db", lambda: None)
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    kb = FakeKnowledgeBase(fail_faq_delete=True)
+    kb.documents["legacy-faq"] = {
+        "content": "旧 FAQ",
+        "metadata": {"doc_type": "faq"},
+    }
+
+    summary = bootstrap_module.bootstrap_law_data(
+        Session,
+        kb,
+        Path("faq_seed.json"),
+        Path("lawyer_seed.json"),
+    )
+
+    assert summary["faq_seeded"] == 1
+    assert summary["lawyer_seeded"] == 0
+    assert summary["faq_synced"] == 1
+    assert "legacy-faq" in kb.documents
+    assert any(key.startswith("faq:") for key in kb.documents)
 
 
 def test_strict_version_rejects_float_string_and_boolean_versions():

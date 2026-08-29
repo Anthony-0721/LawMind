@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
 
 from db.database import init_db
 from db.faq_repository import FaqRepository
@@ -40,7 +43,11 @@ def bootstrap_law_data(
         lawyer_repository = LawyerRepository(session)
         faq_seeded = faq_repository.seed_faqs(faq_items)
         lawyer_seeded = lawyer_repository.seed_lawyers(lawyer_items)
-        knowledge_base.delete_faq_vectors()
+        try:
+            knowledge_base.delete_faq_vectors()
+        except Exception as exc:
+            logger.warning("FAQ vector cleanup skipped: %s", type(exc).__name__)
+
         faq_sync_results = FaqSyncService(
             faq_repository,
             knowledge_base,

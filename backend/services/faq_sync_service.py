@@ -368,6 +368,7 @@ class FaqSyncService:
                     "keywords": faq["keywords"],
                     "active": faq["active"],
                     "source": "law_firm",
+                    "doc_type": "faq",
                     "version": version,
                 }
                 keyword_text = " ".join(faq["keywords"])
@@ -442,19 +443,19 @@ class FaqSyncService:
 
     def update_record(self, faq_id: Any, payload: Any) -> Dict[str, Any]:
         """Validate, update a FAQ through the repository, and synchronize it."""
-        getter = getattr(self.faq_repository, "get_by_id", None)
-        current = getter(str(faq_id)) if getter is not None else None
-        if current is not None and not _validate_crud_payload(payload, current):
-            return {"success": False, "faq_id": str(faq_id), "error": "invalid_faq_payload"}
-        if current is None:
-            return {"success": False, "faq_id": str(faq_id), "error": "faq_update_failed"}
+        normalized_id = str(faq_id)
         try:
-            record = self.faq_repository.update(str(faq_id), payload)
-        except Exception as exc:
-            error = _sanitize_error(exc, payload if isinstance(payload, Mapping) else {})
-            return {"success": False, "error": error}
+            getter = getattr(self.faq_repository, "get_by_id", None)
+            current = getter(normalized_id) if getter is not None else None
+            if current is not None and not _validate_crud_payload(payload, current):
+                return {"success": False, "faq_id": normalized_id, "error": "invalid_faq_payload"}
+            if current is None:
+                return {"success": False, "faq_id": normalized_id, "error": "faq_update_failed"}
+            record = self.faq_repository.update(normalized_id, payload)
+        except Exception:
+            return {"success": False, "error": "faq_update_failed"}
         if not isinstance(record, Mapping):
-            return {"success": False, "faq_id": str(faq_id), "error": "faq_update_failed"}
+            return {"success": False, "faq_id": normalized_id, "error": "faq_update_failed"}
         return self.sync(record)
 
     def toggle_record(self, faq_id: Any, active: Optional[bool] = None) -> Dict[str, Any]:
@@ -473,13 +474,24 @@ class FaqSyncService:
     def delete_record(self, faq_id: Any) -> Dict[str, Any]:
         """Best-effort DB delete, then always remove every retrieval vector."""
         normalized_id = str(faq_id or "").strip()
+        db_delete_failed = False
         try:
-            self.faq_repository.delete(normalized_id)
+            deleted = self.faq_repository.delete(normalized_id)
+            if deleted is False:
+                db_delete_failed = True
         except Exception:
-            # Chroma cleanup is still attempted even when the row is missing or
-            # the repository delete failed.
-            pass
-        return self.sync_delete(normalized_id)
+            db_delete_failed = True
+
+        cleanup_result = self.sync_delete(normalized_id)
+        if cleanup_result.get("success") is not True:
+            return cleanup_result
+        if db_delete_failed:
+            return {
+                "success": False,
+                "faq_id": normalized_id,
+                "error": "faq_db_delete_failed",
+            }
+        return cleanup_result
 
     def _inactive_failure(self, faq_record: Any, faq_id: str, version: int) -> Dict[str, Any]:
         """Inactive records remove stale vectors but are reported as not added."""
