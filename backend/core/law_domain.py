@@ -77,8 +77,10 @@ LAW_TEMPLATES: Dict[LawIntent, List[str]] = {
         "酒后开车被查",
         "醉驾被查",
         "危险驾驶被查",
+        "无证驾驶",
         "血液酒精超标",
         "吹气检测阳性",
+        "无证驾驶被查",
     ],
     LawIntent.CRIMINAL_DEFENSE: [
         "涉嫌犯罪",
@@ -110,6 +112,7 @@ LAW_TEMPLATES: Dict[LawIntent, List[str]] = {
     ],
     LawIntent.TRAFFIC_ACCIDENT: [
         "交通事故",
+        "事故",
         "责任认定",
         "追尾",
         "交通肇事",
@@ -152,6 +155,7 @@ LAW_PATTERNS: Dict[LawIntent, List[str]] = {
         "吹气检测",
         "醉驾被查",
         "危险驾驶被查",
+        "无证驾驶",
     ],
     LawIntent.CRIMINAL_DEFENSE: [
         "刑事拘留",
@@ -192,6 +196,7 @@ LAW_PATTERNS: Dict[LawIntent, List[str]] = {
     ],
     LawIntent.TRAFFIC_ACCIDENT: [
         "交通事故",
+        "事故",
         "责任认定",
         "撞车",
         "追尾",
@@ -272,6 +277,7 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
     ],
     LawRiskFlag.TRAFFIC_ACCIDENT: [
         "交通事故",
+        "事故",
         "撞车",
         "追尾",
         "交通肇事",
@@ -304,16 +310,47 @@ LAW_RISK_RULES: Dict[LawRiskFlag, List[str]] = {
 }
 
 
-_NEGATION_MARKERS = ("没有", "没", "未", "尚未", "不", "无", "并非", "不是")
+_NEGATION_PHRASES = (
+    "并不是没有",
+    "不是没有",
+    "并没有",
+    "并未",
+    "没有发生",
+    "未发生",
+    "未构成",
+    "未造成",
+    "未发现",
+    "没有",
+    "不是",
+    "并非",
+    "并不",
+    "不涉及",
+    "不",
+    "没",
+)
+_NEGATION_SCOPE_RE = re.compile("|".join(re.escape(p) for p in _NEGATION_PHRASES))
+_SCOPE_BREAK_RE = re.compile(
+    r"[，。；！？、,.!?;]|但是|不过|然而|而且|并且|同时|但|而"
+)
+_DOUBLE_NEGATION_NO_LAWYER_RE = re.compile(
+    r"(?:并不是没有|不是没有|并非没有|并不是未|不是未|并未没有|并没有没有)"
+    r"(?:律师|请律师|委托律师|代理人|聘请律师)"
+)
+_SCOPE_LIMIT = 64
+
+
+def _scope_segment(text: str, index: int) -> str:
+    prefix = text[max(0, index - _SCOPE_LIMIT):index]
+    parts = _SCOPE_BREAK_RE.split(prefix)
+    return parts[-1] if parts else prefix
 
 
 def _is_negated_at(text: str, keyword: str, index: int) -> bool:
-    context = text[max(0, index - 6):index]
-    return any(marker in context for marker in _NEGATION_MARKERS)
+    return bool(_NEGATION_SCOPE_RE.search(_scope_segment(text, index)))
 
 
 def has_unnegated_keyword(text: str, keyword: str) -> bool:
-    """Return True when keyword occurs at least once without a nearby negation."""
+    """Return True when keyword occurs in an unnegated scope."""
     index = text.find(keyword)
     while index != -1:
         if not _is_negated_at(text, keyword, index):
@@ -322,21 +359,48 @@ def has_unnegated_keyword(text: str, keyword: str) -> bool:
     return False
 
 
+def _double_negation_ranges(text: str) -> list[tuple[int, int]]:
+    return [
+        (match.start(), match.end())
+        for match in _DOUBLE_NEGATION_NO_LAWYER_RE.finditer(text)
+    ]
+
+
+def _is_in_double_negation(index: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= index < end for start, end in ranges)
+
+
+def has_no_lawyer_risk(text: str) -> bool:
+    """Detect NO_LAWYER without treating double negation as a risk."""
+    ranges = _double_negation_ranges(text)
+    for keyword in LAW_RISK_RULES[LawRiskFlag.NO_LAWYER]:
+        index = text.find(keyword)
+        while index != -1:
+            if not _is_in_double_negation(index, ranges):
+                return True
+            index = text.find(keyword, index + 1)
+    return False
+
+
+def has_double_negated_no_lawyer(text: str) -> bool:
+    """Return True when an explicit double negation makes NO_LAWYER false."""
+    return bool(_DOUBLE_NEGATION_NO_LAWYER_RE.search(text))
+
+
 def detect_law_risk_flags(message: str) -> List[LawRiskFlag]:
     """Return every non-negated risk flag whose keyword is present."""
     text = str(message or "")
     flags: List[LawRiskFlag] = []
     for flag, keywords in LAW_RISK_RULES.items():
+        if flag is LawRiskFlag.NO_LAWYER:
+            if has_no_lawyer_risk(text):
+                flags.append(flag)
+            continue
         for keyword in keywords:
-            if flag is LawRiskFlag.NO_LAWYER:
-                detected = keyword in text
-            else:
-                detected = has_unnegated_keyword(text, keyword)
-            if detected:
+            if has_unnegated_keyword(text, keyword):
                 flags.append(flag)
                 break
     return flags
-
 
 class LawEntityExtractor:
     """Rule-based extractor for the law-domain entity schema used by Task 3."""
@@ -475,10 +539,11 @@ class LawEntityExtractor:
     def _has_lawyer(text: str, risk_flags: List[LawRiskFlag]) -> List[str]:
         if LawRiskFlag.NO_LAWYER in risk_flags:
             return ["no"]
+        if has_double_negated_no_lawyer(text):
+            return ["yes"]
         if any(item in text for item in ("有律师", "已委托律师", "委托了律师", "我的律师", "聘请了律师")):
             return ["yes"]
         return ["unknown"]
-
     @staticmethod
     def _unique(values: List[str]) -> List[str]:
         return list(dict.fromkeys(value for value in values if value))

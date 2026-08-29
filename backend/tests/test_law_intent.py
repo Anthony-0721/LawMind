@@ -227,3 +227,40 @@ def test_negated_phrases_leave_entity_fields_unknown(message, field, expected):
     entities = LawEntityExtractor().extract(message)
 
     assert entities[field] == expected
+
+
+def test_scope_aware_negation_suppresses_any_type_phrase():
+    result = make_law_recognizer().recognize_sync("没有发生任何类型的交通事故")
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT not in result.risk_flags
+    assert result.entities["traffic_accident"] == []
+
+
+def test_double_negation_does_not_trigger_no_lawyer_risk():
+    result = make_law_recognizer().recognize_sync("并不是没有律师")
+
+    assert LawRiskFlag.NO_LAWYER not in result.risk_flags
+    assert result.urgency == UrgencyLevel.MEDIUM
+
+
+def test_unlicensed_driving_is_not_treated_as_negation():
+    result = make_law_recognizer().recognize_sync("无证驾驶发生交通事故")
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT in result.risk_flags
+    assert result.intent in {
+        LawIntent.DANGEROUS_DRIVING,
+        LawIntent.TRAFFIC_ACCIDENT,
+    }
+
+
+def test_minor_in_phrase_does_not_negate_detention():
+    result = make_law_recognizer().recognize_sync("未成年人被刑事拘留")
+
+    assert LawRiskFlag.DETENTION in result.risk_flags
+    assert result.urgency == UrgencyLevel.CRITICAL
+
+
+def test_self_negated_accident_does_not_raise_traffic_risk():
+    result = make_law_recognizer().recognize_sync("本人没有发生事故")
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT not in result.risk_flags
