@@ -518,6 +518,41 @@ def test_agent_service_incomplete_returns_fallback(session_factory):
     assert service.list_recent(10) == []
 
 
+def test_escalation_accepts_existing_contacted_status(session_factory):
+    service = ConsultationService(session_factory)
+    req = Request(
+        message="我愿意留资并预约律师",
+        user_id="test-user",
+        conv_id="conv-1",
+        request_id="req-contact-existing",
+        intent=LawIntent.LAWYER_APPOINTMENT,
+        contact_name="张三",
+        contact_phone="13800138000",
+        consent="愿意",
+    )
+    agent = EscalationAgent(
+        _NoopClient(),
+        "test-model",
+        lawyer_service=_FakeLawyerService(),
+        consultation_service=service,
+    )
+
+    first = asyncio.run(agent.handle(req))
+    assert "create_consultation_record" in first.tools_used
+    saved = service.get_by_request_id(req.request_id)
+    assert saved is not None
+    service.update_status(saved["id"], "CONTACTED")
+
+    retry = asyncio.run(agent.handle(req))
+
+    assert "create_consultation_record" in retry.tools_used
+    assert "已记录信息" in retry.content
+    assert "暂未保存" not in retry.content
+    existing = service.get_by_request_id(req.request_id)
+    assert existing is not None
+    assert existing["status"] == "CONTACTED"
+
+
 def test_escalation_persists_chinese_consent_end_to_end(session_factory):
     service = ConsultationService(session_factory)
     req = Request(

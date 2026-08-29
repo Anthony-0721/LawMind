@@ -467,6 +467,44 @@ def test_escalation_handle_calls_tools_and_creates_record_when_complete():
         assert "张三" not in json.dumps(trace, ensure_ascii=False)
 
 
+def test_escalation_accepts_contacted_status_on_retry():
+    class FakeLawyerService:
+        def recommend(self, legal_domain):
+            return [{"id": "lawyer-1", "legal_domain": legal_domain}]
+
+    class LifecycleConsultationService:
+        def __init__(self):
+            self.saved = None
+
+        def save_from_agent(self, payload):
+            if self.saved is None:
+                self.saved = {**payload, "id": "consultation-1", "status": "PENDING"}
+            return self.saved
+
+    service = LifecycleConsultationService()
+    agent = EscalationAgent(
+        FakeClient(),
+        "test-model",
+        lawyer_service=FakeLawyerService(),
+        consultation_service=service,
+    )
+    req = make_request(
+        "我愿意留资并预约律师",
+        intent=LawIntent.LAWYER_APPOINTMENT,
+        contact_name="张三",
+        contact_phone="13800138000",
+        consent="愿意",
+    )
+    asyncio.run(agent.handle(req))
+    service.saved["status"] = "CONTACTED"
+
+    retry = asyncio.run(agent.handle(req))
+
+    assert "create_consultation_record" in retry.tools_used
+    assert "已记录信息" in retry.content
+    assert "暂未保存" not in retry.content
+
+
 def test_escalation_does_not_create_record_without_complete_contact_and_consent():
     client = FakeClient()
     agent = EscalationAgent(client, "test-model")

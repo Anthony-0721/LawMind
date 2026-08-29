@@ -186,6 +186,12 @@ def _entity_value(req: Request, key: str, default: str = "") -> str:
 
 
 _TRUE_CONSENT_TOKENS = frozenset({"1", "true", "yes", "是", "同意", "愿意"})
+_PERSISTED_CONSULTATION_STATUSES = frozenset({
+    "PENDING",
+    "CONTACTED",
+    "BOOKED",
+    "CLOSED",
+})
 
 
 def _parse_consent(value: Any) -> bool:
@@ -202,7 +208,7 @@ def _is_persisted_consultation(result: Any) -> bool:
         return False
     if result.get("success") is False or result.get("persisted") is False:
         return False
-    return result.get("status") == "PENDING"
+    return result.get("status") in _PERSISTED_CONSULTATION_STATUSES
 
 
 def _request_contact_args(req: Request) -> Dict[str, Any]:
