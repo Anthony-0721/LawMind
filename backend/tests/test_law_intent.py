@@ -492,3 +492,53 @@ def test_hotfix2_pending_event_negations_suppress_risk(message, risk_flag):
     result = make_law_recognizer().recognize_sync(message)
 
     assert risk_flag not in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "没有请律师",
+        "没请律师",
+        "未请律师",
+        "尚未请律师",
+        "尚未委托律师",
+        "尚未请发生交通事故",
+        "尚未请",
+        "没有请发生交通事故",
+        "没请发生交通事故",
+    ],
+)
+def test_hotfix3_required_no_lawyer_phrases_are_detected(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "尚未请发生交通事故",
+        "发生交通事故后尚未请",
+        "尚未请律师发生交通事故",
+        "发生交通事故后尚未请律师",
+    ],
+)
+def test_hotfix3_no_lawyer_pending_phrases_do_not_suppress_traffic(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT in result.risk_flags
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "尚未请假",
+        "尚未请别人",
+        "尚未请病假",
+    ],
+)
+def test_hotfix3_pending_invite_context_avoids_overmatch(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.NO_LAWYER not in result.risk_flags

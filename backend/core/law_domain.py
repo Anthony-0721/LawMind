@@ -268,8 +268,20 @@ NO_LAWYER_PHRASES: tuple[str, ...] = (
     "未委托",
 )
 
-_NO_LAWYER_INVITE_RE = re.compile(
-    r"(?:没有请|没请|未请)(?=律师|代理人|委托|聘请|发生|造成|构成|涉及|交通事故|案件|$)"
+_NO_LAWYER_INVITE_PATTERN = (
+    r"(?:没有请|没请|未请|尚未请)"
+    r"(?=律师|代理人|委托|聘请|发生|造成|构成|涉及|交通事故|案件|\s*$)"
+)
+_NO_LAWYER_RE = re.compile(
+    "|".join(
+        [
+            *(
+                re.escape(phrase)
+                for phrase in sorted(NO_LAWYER_PHRASES, key=len, reverse=True)
+            ),
+            _NO_LAWYER_INVITE_PATTERN,
+        ]
+    )
 )
 
 
@@ -389,9 +401,6 @@ _DOUBLE_NEGATION_NO_INVITE_PHRASES = (
 _POSITIVE_LAWYER_RE = re.compile(
     r"(?<!没)(?<!未)(?<!无)(?:有律师|已委托律师|委托了律师|我的律师|聘请了律师|已经委托了)"
 )
-_NO_LAWYER_PENDING_RE = re.compile(
-    r"尚未(?:委托(?:律师)?|请律师|聘请律师|委托代理人|请代理人)"
-)
 _NEGATION_SEARCH_BEFORE = 12
 _NEGATION_SEARCH_AFTER = 8
 
@@ -419,17 +428,48 @@ def _is_double_negated_no_lawyer_clause(clause: str) -> bool:
     )
 
 
+def _clause_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for match in _SCOPE_BREAK_RE.finditer(text):
+        if match.start() > cursor:
+            spans.append((cursor, match.start()))
+        cursor = match.end()
+    if cursor < len(text):
+        spans.append((cursor, len(text)))
+    return spans
+
+
+def _clause_text_at(text: str, offset: int) -> str:
+    for start, end in _clause_spans(text):
+        if start <= offset < end:
+            return text[start:end]
+    return ""
+
+
+def _no_lawyer_matches(text: str) -> list[tuple[int, int]]:
+    """Return candidate no-lawyer phrase spans from the shared regex."""
+    return [
+        (match.start(), match.end())
+        for match in _NO_LAWYER_RE.finditer(text)
+    ]
+
+
 def _is_negated_at(text: str, keyword: str, index: int) -> bool:
     search_start = max(0, index - _NEGATION_SEARCH_BEFORE)
     search_end = min(len(text), index + len(keyword) + _NEGATION_SEARCH_AFTER)
     local = text[search_start:search_end]
     keyword_end = index + len(keyword)
+    no_lawyer_spans = _no_lawyer_matches(text)
     for match in _NEGATION_SCOPE_RE.finditer(local):
         phrase_start = search_start + match.start()
         phrase_end = search_start + match.end()
         if not _same_clause(text, phrase_start, phrase_end, index, keyword_end):
             continue
-        if match.group() == "尚未" and _NO_LAWYER_PENDING_RE.match(text, phrase_start):
+        if any(
+            no_lawyer_start <= phrase_start < no_lawyer_end
+            for no_lawyer_start, no_lawyer_end in no_lawyer_spans
+        ):
             continue
         if phrase_end >= index - 8 and phrase_start <= keyword_end + 8:
             return True
@@ -451,13 +491,11 @@ def has_no_lawyer_risk(text: str) -> bool:
     clauses = _clauses(text)
     if any(_POSITIVE_LAWYER_RE.search(clause) for clause in clauses):
         return False
-    for clause in clauses:
+    for start, _ in _no_lawyer_matches(text):
+        clause = _clause_text_at(text, start)
         if _is_double_negated_no_lawyer_clause(clause):
             continue
-        if any(keyword in clause for keyword in NO_LAWYER_PHRASES):
-            return True
-        if _NO_LAWYER_INVITE_RE.search(clause):
-            return True
+        return True
     return False
 
 
