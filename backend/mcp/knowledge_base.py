@@ -38,6 +38,11 @@ _LAW_CATEGORY_LABELS = {
     "service": "律所服务",
 }
 
+_LAW_GENERAL_DISCLAIMER = (
+    "温馨提示：以上内容仅为一般法律知识，不构成正式法律意见；"
+    "具体案件请结合实际材料咨询执业律师，紧急或复杂事项应尽快转人工。"
+)
+
 
 def _law_keywords(value: Any) -> List[str]:
     if value is None:
@@ -75,13 +80,14 @@ def load_law_faq_documents(
             f"领域：{category_label}（{category}）\n"
             f"问题：{question}\n"
             f"回答：{answer}\n"
-            f"关键词：{'、'.join(keywords)}"
+            f"关键词：{'、'.join(keywords)}\n"
+            f"{_LAW_GENERAL_DISCLAIMER}"
         )
         documents.append({
             "title": f"FAQ｜{category_label}｜{question}",
             "content": content,
             "metadata": {
-                "source": "law_faq_seed",
+                "source": "law_firm",
                 "doc_type": "faq",
                 "category": category,
                 "active": True,
@@ -101,7 +107,8 @@ def load_law_domain_briefs(
 
     documents: List[Dict[str, Any]] = []
     for path in sorted(root.glob("*.md")):
-        content = path.read_text(encoding="utf-8").strip()
+        raw_content = path.read_text(encoding="utf-8").strip()
+        content = f"{raw_content}\n\n{_LAW_GENERAL_DISCLAIMER}"
         if not content:
             continue
         title = path.stem
@@ -113,9 +120,10 @@ def load_law_domain_briefs(
             "title": title,
             "content": content,
             "metadata": {
-                "source": "law_domain_brief",
+                "source": "law_firm",
                 "doc_type": "domain_brief",
                 "domain": path.stem,
+                "category": path.stem,
                 "active": True,
             },
         })
@@ -132,7 +140,7 @@ class KnowledgeBase:
     不需要额外调用 Anthropic Embeddings API。
     """
 
-    COLLECTION_NAME = "knowledge_base"
+    COLLECTION_NAME = "law_knowledge_base"
 
     def __init__(
         self,
@@ -190,7 +198,12 @@ class KnowledgeBase:
                 doc_id = hashlib.md5(f"{title}_{i}_{chunk[:50]}".encode()).hexdigest()
                 ids.append(doc_id)
                 docs.append(chunk)
-                meta = {"title": title, "chunk_index": i, "total_chunks": len(chunks)}
+                meta = {
+                    "title": title,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks),
+                    "source": "law_firm",
+                }
                 for key, value in (doc.get("metadata") or {}).items():
                     if isinstance(value, (list, dict, tuple)):
                         meta[key] = json.dumps(value, ensure_ascii=False)

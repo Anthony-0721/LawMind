@@ -859,8 +859,8 @@ class ResponseComposer:
         try:
             response = await self._client.messages.create(
                 model=self._model,
-                max_tokens=_env_int("legacy_COMPOSER_MAX_TOKENS", 1000),
-                temperature=_env_float("legacy_COMPOSER_TEMPERATURE", 0.1),
+                max_tokens=_env_int("LAWMIND_COMPOSER_MAX_TOKENS", 1000),
+                temperature=_env_float("LAWMIND_COMPOSER_TEMPERATURE", 0.1),
                 messages=[{"role": "user", "content": prompt}],
             )
             content = extract_text_content(response.content).strip()
@@ -907,7 +907,7 @@ class AgentOrchestrator:
         self._skill_manager = skill_manager
         self._composer = ResponseComposer(client, model, skill_manager)
         self._shared_tools: Dict[str, AgentToolSpec] = {}
-        self._recent_tool_traces = deque(maxlen=_env_int("legacy_TOOL_TRACE_MAX", 200))
+        self._recent_tool_traces = deque(maxlen=_env_int("LAWMIND_TOOL_TRACE_MAX", 200))
 
         # Agent 池：每种律所角色可有多个实例（水平扩展）
         self._pool: Dict[AgentType, List[BaseAgent]] = {
@@ -931,7 +931,7 @@ class AgentOrchestrator:
         可使用更强模型，通用接待可使用更快模型，升级节点本身不需要调用 LLM。
         """
         profile = agent_cls.profile
-        env_name = f"legacy_{agent_cls.agent_type.value.upper()}_MODEL"
+        env_name = f"LAWMIND_{agent_cls.agent_type.value.upper()}_MODEL"
         model = os.getenv(env_name, "").strip() or profile.model
         configured_profile = replace(profile, model=model) if model else profile
         kwargs: Dict[str, Any] = {"profile": configured_profile}

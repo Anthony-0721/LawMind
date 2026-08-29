@@ -89,10 +89,10 @@ async def lifespan(app: FastAPI):
     )
 
     # Skills：启动时从目录加载业务能力说明，并在 Agent 调用 LLM 时动态注入。
-    skills_dir = os.getenv("legacy_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm"))
+    skills_dir = os.getenv("LAWMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm"))
     _skill_manager = SkillManager(
         root_dir=skills_dir,
-        max_prompt_chars=int(os.getenv("legacy_SKILLS_MAX_PROMPT_CHARS", "5000")),
+        max_prompt_chars=int(os.getenv("LAWMIND_SKILLS_MAX_PROMPT_CHARS", "5000")),
     )
     _skill_manager.load()
 
@@ -642,8 +642,8 @@ async def _cli():
 
     cfg = _anthropic_cfg()
     skill_manager = SkillManager(
-        root_dir=os.getenv("legacy_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm")),
-        max_prompt_chars=int(os.getenv("legacy_SKILLS_MAX_PROMPT_CHARS", "5000")),
+        root_dir=os.getenv("LAWMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills" / "law_firm")),
+        max_prompt_chars=int(os.getenv("LAWMIND_SKILLS_MAX_PROMPT_CHARS", "5000")),
     )
     skill_manager.load()
     orch = AgentOrchestrator(

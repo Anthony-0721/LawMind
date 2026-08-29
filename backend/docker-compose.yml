@@ -83,11 +83,11 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-lawmind123}@redis:6379/0
       - CHROMA_PERSIST_DIRECTORY=/app/data/chroma
       - EVAL_BASELINE_PATH=/app/data/eval/baseline.json
-      - legacy_SKILLS_DIR=/app/skills
+      - LAWMIND_SKILLS_DIR=/app/skills/law_firm
     volumes:
       - ./data/chroma:/app/data/chroma
       - ./data/eval:/app/data/eval
-      - ./skills:/app/skills
+      - ./skills/law_firm:/app/skills/law_firm
       - ./logs:/app/logs
     depends_on:
       redis:
