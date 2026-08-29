@@ -1,0 +1,11 @@
+services:
+  lawmind-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lawmind-frontend
+    ports:
+      - "5174:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
