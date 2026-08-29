@@ -405,6 +405,19 @@ def test_knowledge_base_uses_law_collection_and_loads_only_law_docs():
     assert any(meta.get("category") == "dangerous_driving" for meta in kb._collection.added_metadatas)
 
 
+def test_knowledge_base_default_docs_exclude_seed_faqs():
+    kb_module = _load_knowledge_base_module()
+    kb = kb_module.KnowledgeBase.__new__(kb_module.KnowledgeBase)
+    kb._collection = FakeCollection()
+    kb._load_default_docs()
+
+    assert kb._collection.count_value > 0
+    metas = kb._collection.added_metadatas
+    assert all(meta.get("doc_type") != "faq" for meta in metas)
+    assert all("faq_id" not in meta for meta in metas)
+    assert all(not str(meta.get("title", "")).startswith("FAQ｜") for meta in metas)
+
+
 def test_search_handler_returns_law_faq_content_with_disclaimer():
     kb_module = _load_knowledge_base_module()
     kb = kb_module.KnowledgeBase.__new__(kb_module.KnowledgeBase)

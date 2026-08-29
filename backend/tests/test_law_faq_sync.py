@@ -5,8 +5,8 @@ these tests require neither PostgreSQL nor a running ChromaDB server.
 """
 from __future__ import annotations
 
-import types
 import sys
+import types
 from typing import Any, Dict, List, Optional
 
 # Keep the test import offline: the real chromadb package is not required for
@@ -19,7 +19,7 @@ if "chromadb" not in sys.modules:
     sys.modules["chromadb"] = _fake_chromadb
 
 from mcp.knowledge_base import KnowledgeBase
-from services.faq_sync_service import FaqSyncService
+from services.faq_sync_service import FaqSyncService, _sanitize_error
 
 
 def make_faq(
@@ -41,6 +41,9 @@ def make_faq(
         "source": "law_firm",
         "active": active,
         "version": version,
+        "sync_status": "pending",
+        "sync_error": None,
+        "last_sync_at": None,
     }
 
 
@@ -57,7 +60,9 @@ class FakeKnowledgeBase:
     def delete_by_metadata(self, where: Dict[str, Any]) -> int:
         self.delete_calls.append(dict(where))
         if self.fail_delete:
-            raise RuntimeError("chroma delete unavailable")
+            raise RuntimeError(
+                "失败：张三 13800138000 021-12345678 138****1234"
+            )
         faq_id = str(where.get("faq_id", ""))
         before = len(self.documents)
         for doc_id in list(self.documents):
@@ -79,7 +84,8 @@ class FakeKnowledgeBase:
         self.add_calls.append(call)
         if self.fail_add:
             raise RuntimeError(
-                "chroma add failed: 张三 13800138000 secret@example.com"
+                "失败：张三 +86 138 1234 5678 138-0013-8000 "
+                "021-12345678 138****1234 13800138000 secret@example.com"
             )
         for index, doc in enumerate(documents):
             doc_id = doc.get("id") or (
@@ -96,11 +102,23 @@ class FakeKnowledgeBase:
 
 
 class FakeFaqRepository:
-    def __init__(self, records: Optional[List[Dict[str, Any]]] = None):
+    def __init__(
+        self,
+        records: Optional[List[Dict[str, Any]]] = None,
+        *,
+        fail_mark_synced: bool = False,
+    ):
         self.records = list(records or [])
         self.list_all_calls: List[bool] = []
         self.marked_synced: List[tuple[str, int]] = []
         self.marked_failed: List[tuple[str, str]] = []
+        self.fail_mark_synced = fail_mark_synced
+
+    def _find(self, faq_id: str) -> Optional[Dict[str, Any]]:
+        for item in self.records:
+            if item is not None and item.get("id") == faq_id:
+                return item
+        return None
 
     def list_all(self, active_only: bool = False) -> List[Dict[str, Any]]:
         self.list_all_calls.append(active_only)
@@ -108,13 +126,36 @@ class FakeFaqRepository:
             return [item for item in self.records if item["active"]]
         return list(self.records)
 
-    def mark_synced(self, faq_id: str, version: int) -> Dict[str, Any]:
+    def mark_synced(self, faq_id: str, version: int) -> Optional[Dict[str, Any]]:
         self.marked_synced.append((faq_id, version))
-        return make_faq(faq_id, version=version)
+        if self.fail_mark_synced:
+            return None
+        record = self._find(faq_id)
+        if record is None:
+            return None
+        if int(record.get("version") or 1) != int(version):
+            return None
+        updated = dict(record)
+        updated.update({
+            "sync_status": "synced",
+            "sync_error": None,
+            "version": int(version),
+            "last_sync_at": "2026-08-29T00:00:00+00:00",
+        })
+        return updated
 
-    def mark_sync_failed(self, faq_id: str, error: str) -> Dict[str, Any]:
+    def mark_sync_failed(self, faq_id: str, error: str) -> Optional[Dict[str, Any]]:
         self.marked_failed.append((faq_id, error))
-        return make_faq(faq_id)
+        record = self._find(faq_id)
+        if record is None:
+            return None
+        updated = dict(record)
+        updated.update({
+            "sync_status": "failed",
+            "sync_error": error,
+            "last_sync_at": "2026-08-29T00:00:01+00:00",
+        })
+        return updated
 
 
 class FakeCollection:
@@ -152,9 +193,9 @@ class FakeCollection:
 
 
 def test_create_faq_sync_active_adds_document_with_metadata():
-    repo = FakeFaqRepository()
-    kb = FakeKnowledgeBase()
     faq = make_faq()
+    repo = FakeFaqRepository([faq])
+    kb = FakeKnowledgeBase()
     service = FaqSyncService(repo, kb)
 
     result = service.sync(faq)
@@ -188,18 +229,18 @@ def test_create_faq_sync_active_adds_document_with_metadata():
 
 
 def test_update_removes_old_document_and_adds_new_version():
-    repo = FakeFaqRepository()
-    kb = FakeKnowledgeBase()
-    kb.documents["faq:faq-1"] = {
-        "content": "旧问题\n旧回答",
-        "metadata": {"faq_id": "faq-1", "version": 1},
-    }
     updated = make_faq(
         question="新版问题？",
         answer="新版回答。",
         keywords=["更新"],
         version=2,
     )
+    repo = FakeFaqRepository([updated])
+    kb = FakeKnowledgeBase()
+    kb.documents["faq:faq-1"] = {
+        "content": "旧问题\n旧回答",
+        "metadata": {"faq_id": "faq-1", "version": 1},
+    }
     service = FaqSyncService(repo, kb)
 
     result = service.sync(updated)
@@ -214,34 +255,36 @@ def test_update_removes_old_document_and_adds_new_version():
 
 
 def test_disable_removes_document_without_adding_new_one():
-    repo = FakeFaqRepository()
+    disabled = make_faq(active=False, version=2)
+    repo = FakeFaqRepository([disabled])
     kb = FakeKnowledgeBase()
     kb.documents["faq:faq-1"] = {
         "content": "旧内容",
         "metadata": {"faq_id": "faq-1", "version": 1},
     }
-    disabled = make_faq(active=False, version=2)
     service = FaqSyncService(repo, kb)
 
     result = service.sync(disabled)
 
-    assert result["success"] is True
+    assert result["success"] is False
     assert result["added"] is False
-    assert result["sync_status"] == "synced"
+    assert result["sync_status"] == "failed"
+    assert result["error"] == "faq_inactive"
     assert kb.delete_calls == [{"faq_id": "faq-1"}]
     assert kb.documents == {}
     assert kb.add_calls == []
-    assert repo.marked_synced == [("faq-1", 2)]
+    assert repo.marked_synced == []
+    assert repo.marked_failed == [("faq-1", "faq_inactive")]
 
 
-def test_sync_failure_marks_failed_with_sanitized_error():
-    repo = FakeFaqRepository()
-    kb = FakeKnowledgeBase(fail_add=True)
+def test_sync_failure_marks_failed_with_sanitized_error_and_updates_input():
     faq = make_faq(
         question="包含敏感内容的问题",
         answer="敏感答案 13800138000",
         keywords=["私密关键词"],
     )
+    repo = FakeFaqRepository([faq])
+    kb = FakeKnowledgeBase(fail_add=True)
     service = FaqSyncService(repo, kb)
 
     result = service.sync(faq)
@@ -249,17 +292,100 @@ def test_sync_failure_marks_failed_with_sanitized_error():
     assert result["success"] is False
     assert result["sync_status"] == "failed"
     assert result["added"] is False
+    assert faq["sync_status"] == "failed"
+    assert faq["sync_error"] == result["error"]
+    assert faq["version"] == 1
+    assert faq["last_sync_at"] is not None
     assert repo.marked_synced == []
     assert len(repo.marked_failed) == 1
     failed_id, failed_error = repo.marked_failed[0]
     assert failed_id == "faq-1"
-    assert "zhang" not in failed_error.lower()
     assert "张三" not in failed_error
+    assert "+86" not in failed_error
+    assert "138-0013-8000" not in failed_error
+    assert "021-12345678" not in failed_error
+    assert "138****1234" not in failed_error
     assert "13800138000" not in failed_error
     assert "secret@example.com" not in failed_error
     assert "包含敏感内容的问题" not in failed_error
     assert "敏感答案" not in failed_error
     assert "私密关键词" not in failed_error
+
+
+def test_pii_sanitizer_handles_formatted_phone_and_indicator_names():
+    error = RuntimeError(
+        "客户：李四 联系人: 王五 失败：张三 错误：赵六 "
+        "+86 138 1234 5678 138-0013-8000 021-12345678 138****1234 "
+        "13800138000 test@example.com"
+    )
+    sanitized = _sanitize_error(error, {})
+
+    assert "李四" not in sanitized
+    assert "王五" not in sanitized
+    assert "张三" not in sanitized
+    assert "赵六" not in sanitized
+    assert "+86" not in sanitized
+    assert "138-0013-8000" not in sanitized
+    assert "021-12345678" not in sanitized
+    assert "138****1234" not in sanitized
+    assert "13800138000" not in sanitized
+    assert "test@example.com" not in sanitized
+
+
+def test_delete_removes_vector_and_returns_delete_contract():
+    repo = FakeFaqRepository()
+    kb = FakeKnowledgeBase()
+    kb.documents["faq:faq-1"] = {
+        "content": "旧内容",
+        "metadata": {"faq_id": "faq-1"},
+    }
+    service = FaqSyncService(repo, kb)
+
+    result = service.delete("faq-1")
+
+    assert result == {"success": True, "faq_id": "faq-1", "action": "delete"}
+    assert kb.delete_calls == [{"faq_id": "faq-1"}]
+    assert kb.documents == {}
+
+
+def test_delete_failure_returns_sanitized_fixed_error():
+    repo = FakeFaqRepository()
+    kb = FakeKnowledgeBase(fail_delete=True)
+    service = FaqSyncService(repo, kb)
+
+    result = service.delete("faq-1")
+
+    assert result == {"success": False, "error": "faq_sync_delete_failed"}
+
+
+def test_sync_all_continues_after_malformed_record():
+    malformed = {
+        "id": "bad",
+        "category": "criminal",
+        "answer": "只有答案",
+        "keywords": [],
+        "active": True,
+        "version": 1,
+    }
+    valid = make_faq("faq-valid", question="有效问题", answer="有效答案")
+    repo = FakeFaqRepository([None, malformed, valid])
+    kb = FakeKnowledgeBase()
+    kb.documents["faq:bad"] = {
+        "content": "旧内容",
+        "metadata": {"faq_id": "bad"},
+    }
+    service = FaqSyncService(repo, kb)
+
+    results = service.sync_all()
+
+    assert len(results) == 3
+    assert results[0]["success"] is False
+    assert results[1]["success"] is False
+    assert results[2]["success"] is True
+    assert "faq:bad" not in kb.documents
+    assert "faq:faq-valid" in kb.documents
+    assert repo.marked_failed[0][0] == "bad"
+    assert repo.marked_synced == [("faq-valid", 1)]
 
 
 def test_sync_all_processes_active_and_inactive_records():
@@ -279,9 +405,26 @@ def test_sync_all_processes_active_and_inactive_records():
 
     assert repo.list_all_calls == [False]
     assert [item["faq_id"] for item in results] == ["faq-active", "faq-inactive"]
-    assert all(item["success"] for item in results)
+    assert results[0]["success"] is True
+    assert results[1]["success"] is False
     assert list(kb.documents) == ["faq:faq-active"]
-    assert repo.marked_synced == [("faq-active", 1), ("faq-inactive", 3)]
+    assert repo.marked_synced == [("faq-active", 1)]
+    assert repo.marked_failed == [("faq-inactive", "faq_inactive")]
+
+
+def test_stale_version_mark_synced_returns_failure():
+    faq = make_faq(version=1)
+    repo = FakeFaqRepository([make_faq(version=2)])
+    kb = FakeKnowledgeBase()
+    service = FaqSyncService(repo, kb)
+
+    result = service.sync(faq)
+
+    assert result["success"] is False
+    assert result["error"] == "faq_sync_mark_synced_failed"
+    assert kb.documents == {}
+    assert repo.marked_synced == [("faq-1", 1)]
+    assert repo.marked_failed[-1][0] == "faq-1"
 
 
 def test_knowledge_base_add_documents_supports_stable_id_and_metadata():

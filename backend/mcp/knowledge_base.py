@@ -365,12 +365,10 @@ class KnowledgeBase:
         return chunks
 
     def _load_default_docs(self) -> None:
-        """导入默认法律知识库（律所 FAQ + 领域知识摘要）。"""
-        default_docs = load_law_faq_documents()
+        """导入默认法律知识库（领域摘要；FAQ 由 FaqSyncService 管理）。"""
         domain_briefs = load_law_domain_briefs()
-        self.add_documents(default_docs + domain_briefs)
+        self.add_documents(domain_briefs)
         logger.info(
-            "已导入默认律所知识库: FAQ %d 篇，领域摘要 %d 篇",
-            len(default_docs),
+            "已导入默认律所知识库: 领域摘要 %d 篇",
             len(domain_briefs),
         )

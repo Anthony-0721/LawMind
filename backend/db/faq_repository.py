@@ -134,9 +134,16 @@ class FaqRepository:
     # ── Sync support ──────────────────────────────────────────────────────
 
     def mark_synced(self, faq_id: str, version: int) -> Optional[Dict[str, Any]]:
-        """Mark a FAQ as successfully synchronized and record its version."""
+        """Mark a FAQ as successfully synchronized only at the expected version."""
         record = self.session.get(Faq, str(faq_id))
         if record is None:
+            return None
+        try:
+            current_version = int(record.version or 1)
+            target_version = int(version)
+        except (TypeError, ValueError):
+            return None
+        if current_version != target_version:
             return None
         record.sync_status = "synced"
         record.sync_error = None

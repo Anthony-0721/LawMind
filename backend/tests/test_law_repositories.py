@@ -280,18 +280,22 @@ def test_faq_mark_synced_and_mark_failed(session):
         "keywords": ["同步"],
     })
 
-    synced = repo.mark_synced(faq["id"], 2)
+    original_version = faq["version"]
+    synced = repo.mark_synced(faq["id"], original_version)
     assert synced is not None
     assert synced["sync_status"] == "synced"
-    assert synced["version"] == 2
+    assert synced["version"] == original_version
     assert synced["sync_error"] is None
     assert synced["last_sync_at"] is not None
+
+    stale = repo.mark_synced(faq["id"], original_version + 1)
+    assert stale is None
 
     failed = repo.mark_sync_failed(faq["id"], "chroma unavailable")
     assert failed is not None
     assert failed["sync_status"] == "failed"
     assert failed["sync_error"] == "chroma unavailable"
-    assert failed["version"] == 2
+    assert failed["version"] == original_version
 
 
 def test_faq_update_preserves_explicit_sync_status(session):
@@ -301,7 +305,10 @@ def test_faq_update_preserves_explicit_sync_status(session):
         "question": "显式同步状态 FAQ",
         "answer": "原始回答",
     })
-    repo.mark_synced(faq["id"], 3)
+    repo.update(faq["id"], {"question": "显式同步状态 FAQ 更新"})
+    bumped = repo.get_by_id(faq["id"])
+    assert bumped is not None
+    assert repo.mark_synced(faq["id"], bumped["version"]) is not None
 
     updated = repo.update(faq["id"], {
         "sync_status": "failed",
