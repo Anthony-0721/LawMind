@@ -16,7 +16,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import chromadb
 
@@ -186,23 +186,63 @@ class KnowledgeBase:
 
     # ── 文档管理 ──────────────────────────────────────────────────────────────
 
-    def add_documents(self, documents: List[Dict[str, str]]) -> int:
+    def delete_by_metadata(self, where: Mapping[str, Any]) -> int:
+        """Delete vectors matching metadata filters (for example FAQ id)."""
+        deleted = self._collection.delete(where=dict(where))
+        if deleted is None:
+            return 0
+        if isinstance(deleted, (list, tuple, set)):
+            return len(deleted)
+        try:
+            return int(deleted)
+        except (TypeError, ValueError):
+            return 0
+
+    def add_documents(
+        self,
+        documents: List[Dict[str, Any]],
+        metadatas: Optional[Sequence[Mapping[str, Any]]] = None,
+        ids: Optional[Sequence[str]] = None,
+    ) -> int:
         """
         批量导入文档到知识库。
 
-        documents 格式: [{"title": "...", "content": "..."}, ...]
+        documents 格式: [{"title": "...", "content": "...", "metadata": {...}}, ...]
         长文档会自动切片（每片 500 字）。
+        可通过 doc["id"] 或 ids 参数指定稳定 ID；通过 doc["metadata"] 或
+        metadatas 参数写入 Chroma metadata。
         """
-        ids, docs, metas = [], [], []
+        if isinstance(ids, str):
+            explicit_ids = [ids]
+        else:
+            explicit_ids = list(ids or [])
+        if explicit_ids and len(explicit_ids) != len(documents):
+            raise ValueError("ids length must match documents length")
+        if isinstance(metadatas, Mapping):
+            explicit_metas = [dict(metadatas)] * len(documents)
+        elif metadatas is not None:
+            explicit_metas = list(metadatas)
+        else:
+            explicit_metas = [None] * len(documents)
+        if len(explicit_metas) != len(documents):
+            raise ValueError("metadatas length must match documents length")
 
-        for doc in documents:
+        ids_out, docs, metas = [], [], []
+
+        for index, doc in enumerate(documents):
             title   = doc.get("title", "")
             content = doc.get("content", "")
             chunks  = self._chunk_text(content, chunk_size=500)
+            explicit_id = str(doc.get("id") or "").strip() or (
+                explicit_ids[index] if explicit_ids else ""
+            )
 
             for i, chunk in enumerate(chunks):
-                doc_id = hashlib.md5(f"{title}_{i}_{chunk[:50]}".encode()).hexdigest()
-                ids.append(doc_id)
+                if explicit_id:
+                    doc_id = explicit_id if i == 0 else f"{explicit_id}:{i}"
+                else:
+                    doc_id = hashlib.md5(f"{title}_{i}_{chunk[:50]}".encode()).hexdigest()
+                ids_out.append(doc_id)
                 docs.append(chunk)
                 meta = {
                     "title": title,
@@ -210,23 +250,34 @@ class KnowledgeBase:
                     "total_chunks": len(chunks),
                     "source": "law_firm",
                 }
-                for key, value in (doc.get("metadata") or {}).items():
-                    if isinstance(value, (list, dict, tuple)):
-                        meta[key] = json.dumps(value, ensure_ascii=False)
-                    else:
-                        meta[key] = value
+                for source_meta in (doc.get("metadata") or {}, explicit_metas[index] or {}):
+                    for key, value in source_meta.items():
+                        if isinstance(value, (list, dict, tuple)):
+                            meta[key] = json.dumps(value, ensure_ascii=False)
+                        else:
+                            meta[key] = value
                 metas.append(meta)
 
-        if ids:
+        if ids_out:
             # ChromaDB 会自动生成 Embedding
-            self._collection.add(ids=ids, documents=docs, metadatas=metas)
-            logger.info(f"知识库导入 {len(ids)} 个文档片段")
+            self._collection.add(ids=ids_out, documents=docs, metadatas=metas)
+            logger.info(f"知识库导入 {len(ids_out)} 个文档片段")
 
-        return len(ids)
+        return len(ids_out)
 
-    async def add_documents_async(self, documents: List[Dict[str, str]]) -> int:
+    async def add_documents_async(
+        self,
+        documents: List[Dict[str, Any]],
+        metadatas: Optional[Sequence[Mapping[str, Any]]] = None,
+        ids: Optional[Sequence[str]] = None,
+    ) -> int:
         """异步导入文档；ChromaDB 客户端为同步实现，因此放入线程池执行。"""
-        return await asyncio.to_thread(self.add_documents, documents)
+        return await asyncio.to_thread(
+            self.add_documents,
+            documents,
+            metadatas=metadatas,
+            ids=ids,
+        )
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
@@ -251,6 +302,9 @@ class KnowledgeBase:
                     "content":  doc,
                     "score":    round(1.0 - dist, 4),  # ChromaDB 返回距离，转为相似度
                     "chunk":    meta.get("chunk_index", 0),
+                    "metadata": dict(meta),
+                    "faq_id":   meta.get("faq_id", ""),
+                    "category": meta.get("category", ""),
                 })
 
         return items
