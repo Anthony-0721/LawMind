@@ -1,0 +1,86 @@
+{
+  "timestamp": "2026-08-30T02:22:57.910624",
+  "total": 1,
+  "passed": 1,
+  "pass_rate": 1.0,
+  "avg_scores": {
+    "intent_accuracy": 1.0
+  },
+  "regressions": [],
+  "recommendations": [
+    "所有指标均达标，继续保持"
+  ],
+  "results": [
+    {
+      "test_id": "intent_recognition",
+      "passed": true,
+      "scores": {
+        "accuracy": 1.0,
+        "macro_f1": 1.0
+      },
+      "detail": "准确率 100.0%，Macro-F1 1.000",
+      "metadata": {
+        "total": 8,
+        "correct": 8,
+        "cases": [
+          {
+            "message": "我可能醉驾被查了，会怎么样？",
+            "expected": "dangerous_driving",
+            "predicted": "dangerous_driving",
+            "confidence": 0.8,
+            "reasoning": ""
+          },
+          {
+            "message": "家人已经被刑事拘留，想找辩护律师",
+            "expected": "criminal_defense",
+            "predicted": "criminal_defense",
+            "confidence": 0.9,
+            "reasoning": ""
+          },
+          {
+            "message": "公司拖欠工资，我想申请劳动仲裁",
+            "expected": "labor_dispute",
+            "predicted": "labor_dispute",
+            "confidence": 0.9,
+            "reasoning": ""
+          },
+          {
+            "message": "我想咨询离婚和抚养权",
+            "expected": "marriage_family",
+            "predicted": "marriage_family",
+            "confidence": 0.9,
+            "reasoning": ""
+          },
+          {
+            "message": "合同纠纷，对方违约，想起诉",
+            "expected": "contract_dispute",
+            "predicted": "contract_dispute",
+            "confidence": 0.95,
+            "reasoning": ""
+          },
+          {
+            "message": "交通事故责任认定和赔偿",
+            "expected": "traffic_accident",
+            "predicted": "traffic_accident",
+            "confidence": 0.7,
+            "reasoning": ""
+          },
+          {
+            "message": "民间借贷，对方欠钱不还，有借条",
+            "expected": "civil_loan",
+            "predicted": "civil_loan",
+            "confidence": 0.95,
+            "reasoning": ""
+          },
+          {
+            "message": "帮我预约律师",
+            "expected": "lawyer_appointment",
+            "predicted": "lawyer_appointment",
+            "confidence": 0.7,
+            "reasoning": ""
+          }
+        ]
+      }
+    }
+  ]
+}

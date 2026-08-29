@@ -31,6 +31,10 @@ from core.llm_utils import extract_text_content
 logger = logging.getLogger(__name__)
 
 
+# 仓库内置的 LawMind 评测基线；运行时可由 EVAL_BASELINE_PATH 覆盖。
+DEFAULT_BASELINE_PATH = str(pathlib.Path(__file__).resolve().parents[1] / "data" / "eval" / "law_baseline.json")
+
+
 # ── 数据结构 ──────────────────────────────────────────────────────────────────
 
 @dataclass

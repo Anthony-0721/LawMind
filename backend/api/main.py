@@ -96,7 +96,10 @@ async def lifespan(app: FastAPI):
 
     from agents.agent_orchestrator import AgentOrchestrator, Request, build_shared_law_rag_tools
     from core.intent_recognizer import LawIntentRecognizer
-    from evaluation.evaluator import EndToEndEvaluator
+    from evaluation.evaluator import (
+        DEFAULT_BASELINE_PATH as DEFAULT_LAW_BASELINE_PATH,
+        EndToEndEvaluator,
+    )
     from mcp.knowledge_base import KnowledgeBase
     from mcp.tool_manager import MCPToolManager, Tool
     from memory.conversation_memory import MemoryManager
@@ -251,7 +254,7 @@ async def lifespan(app: FastAPI):
         api_key=cfg["api_key"],
         base_url=cfg.get("base_url"),
         model=cfg["model"],
-        baseline_path=os.getenv("EVAL_BASELINE_PATH", "/app/data/eval/baseline.json"),
+        baseline_path=os.getenv("EVAL_BASELINE_PATH") or DEFAULT_LAW_BASELINE_PATH,
     )
 
     logger.info("LawMind 已就绪")

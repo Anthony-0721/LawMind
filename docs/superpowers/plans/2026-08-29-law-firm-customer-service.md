@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **实现状态（2026-08-30）：** 已实施。最终仓库为 Python/FastAPI 单后端 + Vue 3/Vite 前端；未保留旧客服 Skills 或 Java 服务；根目录 `docker-compose.yml` 是唯一部署入口。详细说明见 [docs/architecture.md](../architecture.md)。
+
 **Goal:** 构建独立运行的 LawMind 律所对外智能法律咨询系统，保留核心多 Agent 架构，新增法律意图、4 个 Agent、律所 Skills、PostgreSQL 咨询/FAQ/律师数据、staff 页面和联合 Docker Compose。
 
 **Architecture:** 保留 MemoryManager -> IntentRecognizer -> AgentOrchestrator -> Agent/Tools -> Memory 的主链路。业务域替换为法律领域；新增 SQLAlchemy + PostgreSQL 持久化层，FAQ 通过同步服务写入 ChromaDB；前端保留 Vue 3，拆成对外客户页和工作人员页。
@@ -17,7 +19,7 @@
 - 只支持中国大陆法律语境。
 - 首版只支持 7 类个人法律领域，重点醉驾/危险驾驶。
 - PII 首版明文存储，但列表脱敏、禁止写入日志、禁止在对外页面展示。
-- 不新增 Java 改造；不接 law-firm-ai；不做真实工单、文件上传、通知、实时人工。
+- 后端统一为 Python/FastAPI，不提供 Java/其他后端；不接 law-firm-ai；不做真实工单、文件上传、通知、实时人工。
 - 保持一个共享 ChromaDB knowledge_base，不按 Agent 拆分知识库。
 - FAQ 同步采用同步同步，失败标记 `sync_status=failed`。
 - PostgreSQL 宿主机端口使用 `5433:5432`。
@@ -54,13 +56,6 @@ backend/tests/test_law_api.py
 frontend/src/views/CustomerConsultation.vue
 frontend/src/views/StaffConsole.vue
 frontend/src/lib/lawApi.js
-frontend/src/components/LawChatPanel.vue
-frontend/src/components/LawyerCard.vue
-frontend/src/components/ContactForm.vue
-frontend/src/components/ConsultationList.vue
-frontend/src/components/FaqManager.vue
-frontend/src/components/LawyerManager.vue
-frontend/src/components/DebugConsole.vue
 docker-compose.yml
 .env.law.example
 ```
@@ -75,13 +70,15 @@ backend/mcp/knowledge_base.py
 backend/mcp/tool_manager.py
 backend/api/main.py
 backend/requirements.txt
-backend/skills/_legacy_customer_support/*
-README.md
+backend/evaluation/evaluator.py
+backend/data/eval/law_baseline.json
+backend/README.md
+frontend/README.md
 frontend/package.json
 frontend/src/App.vue
 frontend/src/main.js
-frontend/src/lib/backends.js
 frontend/nginx.conf
+docs/architecture.md
 ```
 
 ---
@@ -190,7 +187,7 @@ docker-compose.yml
 Run:
 
 ```powershell
-rg -n "LEGACY_BRAND" .
+rg -n "OLD_BRAND_MARKER" .
 ```
 
 Expected: 无输出。如果仍有残留，继续替换为 LawMind。
@@ -634,14 +631,9 @@ domain_briefs = load_law_domain_briefs()
 self.add_documents(default_docs + domain_briefs)
 ```
 
-- [ ] **Step 4: 复制原 Skills 到 legacy**
+- [x] **Step 4: 仅保留律所 Skills，不保留原客服 Skills**
 
-```bash
-mkdir -p skills/_legacy_customer_support
-git mv skills/general_customer_service skills/_legacy_customer_support/general_customer_service
-git mv skills/technical_support skills/_legacy_customer_support/technical_support
-git mv skills/billing_support skills/_legacy_customer_support/billing_support
-```
+最终仓库只提交 `/backend/skills/law_firm/` 下的 4 个 Skill；原始客服内容不进入 LawMind。
 
 - [ ] **Step 5: 验证**
 
@@ -1003,7 +995,7 @@ def test_admin_requires_password():
 
 ```python
 def require_admin(x_admin_password: str = Header(None)):
-    expected = os.getenv("LAW_FIRM_ADMIN_PASSWORD", "")
+    expected = os.getenv("LAWMIND_ADMIN_PASSWORD", "")
     if not expected or x_admin_password != expected:
         raise HTTPException(403, "无权限")
 ```
@@ -1146,13 +1138,13 @@ postgres:
   ports:
     - "5433:5432"
   environment:
-    POSTGRES_USER: ${LAW_DB_USER:-lawuser}
-    POSTGRES_PASSWORD: ${LAW_DB_PASSWORD:-lawpass}
-    POSTGRES_DB: ${LAW_DB_NAME:-lawmind_law}
+    POSTGRES_USER: ${LAWMIND_DB_USER:-lawuser}
+    POSTGRES_PASSWORD: ${LAWMIND_DB_PASSWORD:-lawpass}
+    POSTGRES_DB: ${LAWMIND_DB_NAME:-lawmind_law}
   volumes:
     - postgres-data:/var/lib/postgresql/data
   healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U $${LAW_DB_USER:-lawuser} -d $${LAW_DB_NAME:-lawmind_law}"]
+    test: ["CMD-SHELL", "pg_isready -U $${LAWMIND_DB_USER:-lawuser} -d $${LAWMIND_DB_NAME:-lawmind_law}"]
 ```
 
 - [ ] **Step 2: 应用连接 PostgreSQL**
@@ -1160,8 +1152,8 @@ postgres:
 ```yaml
 lawmind-api:
   environment:
-    DATABASE_URL: postgresql://${LAW_DB_USER:-lawuser}:${LAW_DB_PASSWORD:-lawpass}@postgres:5432/${LAW_DB_NAME:-lawmind_law}
-    LAW_FIRM_ADMIN_PASSWORD: ${LAW_FIRM_ADMIN_PASSWORD:-changeme}
+    DATABASE_URL: postgresql://${LAWMIND_DB_USER:-lawuser}:${LAWMIND_DB_PASSWORD:-lawpass}@postgres:5432/${LAWMIND_DB_NAME:-lawmind_law}
+    LAWMIND_ADMIN_PASSWORD: ${LAWMIND_ADMIN_PASSWORD:-REPLACE_ME_ADMIN_PASSWORD}
 ```
 
 - [ ] **Step 3: 前端服务加入同一 Compose**
@@ -1237,9 +1229,9 @@ assert "不构成正式法律意见" in response
 python -m pytest tests -v
 ```
 
-- [ ] **Step 4: 更新 README 和架构文档**
+- [x] **Step 4: 更新 README 和架构文档**
 
-- [ ] **Step 5: 最终提交**
+- [x] **Step 5: 最终提交**
 
 ```bash
 git add .
@@ -1256,3 +1248,14 @@ git commit -m "docs: update law firm project documentation"
 - PostgreSQL `5433` 与现有 law-firm-ai `5432` 不冲突。
 - 保留原 `EscalationAgent` 作为第 4 个 Agent。
 - 保留一个共享 Chroma knowledge_base。
+
+---
+
+## 最终回归记录（Task 12）
+
+- 默认评测：`DEFAULT_INTENT_CASES` / `DEFAULT_DIALOG_CASES` 已面向 LawMind。
+- 基线：`backend/data/eval/law_baseline.json`。
+- 免责声明：API 与评测测试均检查“不构成正式法律意见”。
+- 后端测试：`python -m pytest tests -v -p no:cacheprovider`。
+- 前端构建：`npm run build`。
+- 文档：README、backend/frontend README、`docs/architecture.md`。

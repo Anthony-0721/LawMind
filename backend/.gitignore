@@ -11,7 +11,9 @@ venv/
 .env
 
 # 数据目录
-data/
+data/*
+!data/eval/
+!data/eval/*.json
 *.db
 *.sqlite3
 logs/

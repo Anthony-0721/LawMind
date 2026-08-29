@@ -133,7 +133,7 @@ class FakeOrchestrator:
     async def run(self, request: Any) -> Dict[str, Any]:
         return {
             "request_id": "server-orchestrator-request",
-            "response": "这是模拟的法律咨询回复（未调用 LLM）",
+            "response": "这是模拟的法律咨询回复（未调用 LLM）。以上内容仅供参考，不构成正式法律意见。",
             "intent": "dangerous_driving",
             "agent_type": "criminal",
             "agent_types": ["criminal"],
@@ -798,6 +798,7 @@ def test_law_chat_uses_whitelisted_response_and_server_token():
     assert data["conversation_id"] == "client-conv"
     assert data["session_token"]
     assert data["response"]
+    assert "不构成正式法律意见" in data["response"]
     assert data["intent"] == "dangerous_driving"
     assert data["case_stage"] == "拘留"
     assert data["risk_flags"] == ["detention"]
