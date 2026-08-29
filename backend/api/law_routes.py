@@ -15,7 +15,7 @@ import uuid
 from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from core.intent_recognizer import UrgencyLevel
 from core.law_domain import LawIntent, LawRiskFlag
@@ -64,7 +64,27 @@ class LawChatRequest(BaseModel):
     request_id: Optional[str] = None
 
 
+class LawChatPublicResponse(BaseModel):
+    """Whitelisted public chat response; no internal agent/routing data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    conversation_id: str
+    response: str
+    intent: str = ""
+    intent_group: str = ""
+    legal_domain: str = ""
+    case_stage: str = ""
+    risk_flags: List[str] = Field(default_factory=list)
+    missing_facts: List[str] = Field(default_factory=list)
+    recommended_lawyers: List[Dict[str, Any]] = Field(default_factory=list)
+    consultation_draft_id: Optional[str] = None
+
+
 class LawConsultationRequest(BaseModel):
+    """Backward-compatible alias; the public endpoint uses the strict model."""
+
     model_config = ConfigDict(extra="allow")
 
     request_id: Optional[str] = None
@@ -83,12 +103,81 @@ class LawConsultationRequest(BaseModel):
     facts: Dict[str, Any] = Field(default_factory=dict)
 
 
-class LawTransferRequest(BaseModel):
-    request_id: Optional[str] = None
-    user_id: str = "anonymous"
-    conv_id: Optional[str] = None
+def _validate_public_consent(value: Any) -> Any:
+    if isinstance(value, bool):
+        if value is not True:
+            raise ValueError("consent must be true")
+        return value
+    if isinstance(value, str) and value.strip().lower() in _TRUE_CONSENT_TOKENS:
+        return value
+    raise ValueError("consent must be 是/同意/愿意/yes/true/1 or true")
+
+
+class LawConsultationPublicRequest(BaseModel):
+    """Strict public lead submission schema; internal fields are forbidden."""
+
+    model_config = ConfigDict(extra="forbid")
+
     conversation_id: Optional[str] = None
-    message: str = "我想转人工咨询"
+    name: str
+    phone: str
+    city: Optional[str] = None
+    preferred_time: Optional[str] = None
+    consent: Any
+    legal_domain: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_empty(cls, value: str) -> str:
+        if not str(value or "").strip():
+            raise ValueError("name is required")
+        return str(value).strip()
+
+    @field_validator("phone")
+    @classmethod
+    def _phone_valid(cls, value: str) -> str:
+        phone = str(value or "").strip()
+        if not _MOBILE_RE.fullmatch(phone):
+            raise ValueError("phone must be a valid mainland mobile number")
+        return phone
+
+    @field_validator("consent", mode="before")
+    @classmethod
+    def _consent_valid(cls, value: Any) -> Any:
+        return _validate_public_consent(value)
+
+
+class LawTransferRequest(BaseModel):
+    """Strict lead-capture schema used by the high-priority transfer endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    phone: str
+    city: Optional[str] = None
+    preferred_time: Optional[str] = None
+    consent: Any
+    legal_domain: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_empty(cls, value: str) -> str:
+        if not str(value or "").strip():
+            raise ValueError("name is required")
+        return str(value).strip()
+
+    @field_validator("phone")
+    @classmethod
+    def _phone_valid(cls, value: str) -> str:
+        phone = str(value or "").strip()
+        if not _MOBILE_RE.fullmatch(phone):
+            raise ValueError("phone must be a valid mainland mobile number")
+        return phone
+
+    @field_validator("consent", mode="before")
+    @classmethod
+    def _consent_valid(cls, value: Any) -> Any:
+        return _validate_public_consent(value)
 
 
 class ConsultationStatusRequest(BaseModel):
@@ -244,42 +333,101 @@ def _require(runtime: LawRuntime, name: str, message: str) -> Any:
     return value
 
 
-def _consent_truthy(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in _TRUE_CONSENT_TOKENS
-    return bool(value)
+class _PublicRole:
+    def __init__(self, value: str):
+        self.value = value
 
 
-def _contact_value(data: Mapping[str, Any], *keys: str) -> str:
-    contact = data.get("contact")
-    nested = contact if isinstance(contact, Mapping) else {}
-    for key in keys:
-        for source in (data, nested):
-            value = source.get(key)
-            if value not in (None, ""):
-                return str(value).strip()
-    return ""
+def _server_token() -> str:
+    prefix = os.getenv("LAWMIND_SESSION_PREFIX", "lawmind-session")
+    return f"{prefix}:{uuid.uuid4()}"
 
 
-def _public_payload(body: LawConsultationRequest) -> Dict[str, Any]:
-    data = body.model_dump(exclude_none=True)
-    name = _contact_value(data, "contact_name", "name")
-    phone = _contact_value(data, "contact_phone", "phone")
-    consent_raw = data.get("consent")
-    if consent_raw is None:
-        contact = data.get("contact")
-        if isinstance(contact, Mapping):
-            consent_raw = contact.get("consent")
-    if not name or not _MOBILE_RE.fullmatch(phone) or not _consent_truthy(consent_raw):
-        raise HTTPException(
-            status_code=422,
-            detail="请填写有效姓名、中国大陆手机号，并同意律师联系您",
-        )
-    data["contact_name"] = name
-    data["contact_phone"] = phone
-    data["consent"] = _consent_truthy(consent_raw)
-    data.setdefault("request_id", str(uuid.uuid4()))
-    return data
+def _lead_payload(
+    *,
+    name: str,
+    phone: str,
+    city: Optional[str] = None,
+    preferred_time: Optional[str] = None,
+    consent: Any,
+    legal_domain: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    source: str = "public",
+) -> Dict[str, Any]:
+    """Build a server-trusted public lead payload."""
+    payload = {
+        "conversation_id": conversation_id or _server_token(),
+        "user_id": _server_token(),
+        "contact_name": str(name or "").strip(),
+        "contact_phone": str(phone or "").strip(),
+        "consent": consent,
+        "request_id": str(uuid.uuid4()),
+        "source": source,
+    }
+    if city is not None:
+        payload["city"] = str(city or "").strip()
+    if preferred_time is not None:
+        payload["preferred_time"] = str(preferred_time or "").strip()
+    if legal_domain is not None:
+        payload["legal_domain"] = str(legal_domain or "").strip()
+    return payload
+
+
+def _mask_name(value: Any) -> str:
+    text = str(value or "").strip()
+    return f"{text[:1]}*" if text else ""
+
+
+def _mask_phone(value: Any) -> str:
+    text = re.sub(r"\D", "", str(value or ""))
+    if len(text) >= 7:
+        return f"{text[:3]}****{text[-4:]}"
+    return "****"
+
+
+def _consultation_summary(record: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": str(record.get("id") or ""),
+        "name": _mask_name(record.get("contact_name")),
+        "phone": _mask_phone(record.get("contact_phone")),
+        "legal_domain": str(record.get("legal_domain") or ""),
+        "status": str(record.get("status") or ""),
+        "created_at": str(record.get("created_at") or ""),
+    }
+
+
+def _first_entity_value(entities: Any, key: str) -> str:
+    if not isinstance(entities, Mapping):
+        return ""
+    value = entities.get(key)
+    if isinstance(value, (list, tuple)):
+        return str(value[0]) if value else ""
+    return str(value) if value not in (None, "") else ""
+
+
+def _entity_list(entities: Any, key: str) -> List[str]:
+    if not isinstance(entities, Mapping):
+        return []
+    value = entities.get(key) or []
+    if not isinstance(value, (list, tuple, set)):
+        value = [value]
+    return [str(item) for item in value if str(item)]
+
+
+def _sanitize_recommended_lawyers(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: List[Dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        result.append({
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or ""),
+            "specialties": [str(x) for x in (item.get("specialties") or [])],
+            "intro": str(item.get("intro") or ""),
+        })
+    return result
 
 
 def _result_error(error: str = "operation failed") -> HTTPException:
@@ -476,38 +624,41 @@ def list_public_lawyers(
 ) -> List[Dict[str, Any]]:
     runtime = _runtime_for(request)
     lawyer_service = _require(runtime, "lawyer_service", "律师服务未初始化")
-    if domain:
-        return lawyer_service.find_active_by_domain(domain)
-    records = _staff_call(
-        getattr(lawyer_service, "list_all", None),
-        active_only=True,
-    )
-    if records is None:
-        records = []
-    return records
+    records = lawyer_service.recommend(domain or None, limit=3)
+    if isinstance(records, Mapping):
+        records = records.get("lawyers") or records.get("items") or []
+    return records if isinstance(records, list) else []
 
 
 @law_router.post("/consultations")
 def create_public_consultation(
-    body: LawConsultationRequest,
+    body: LawConsultationPublicRequest,
     request: Request,
 ) -> Dict[str, Any]:
     runtime = _runtime_for(request)
     consultation_service = _require(
         runtime, "consultation_service", "咨询记录服务未初始化"
     )
-    payload = _public_payload(body)
+    payload = _lead_payload(
+        conversation_id=body.conversation_id,
+        name=body.name,
+        phone=body.phone,
+        city=body.city,
+        preferred_time=body.preferred_time,
+        consent=body.consent,
+        legal_domain=body.legal_domain,
+        source="public",
+    )
     saved = consultation_service.save_public(payload)
     if (
         not isinstance(saved, Mapping)
         or saved.get("success") is False
         or saved.get("persisted") is False
-        or str(saved.get("status") or "").upper() != "PENDING"
+        or str(saved.get("status") or "").upper() not in _CONSULTATION_STATUSES
     ):
         raise HTTPException(status_code=400, detail="咨询信息不完整，请检查后重试")
     return {
         "consultation_id": saved.get("id") or saved.get("consultation_id"),
-        "request_id": saved.get("request_id") or payload.get("request_id"),
         "status": saved.get("status") or "PENDING",
         "message": "咨询已提交，我们会尽快联系您",
     }
@@ -518,25 +669,49 @@ def create_transfer_request(
     body: LawTransferRequest,
     request: Request,
 ) -> Dict[str, Any]:
-    del request
-    request_id = body.request_id or str(uuid.uuid4())
+    runtime = _runtime_for(request)
+    consultation_service = _require(
+        runtime, "consultation_service", "咨询记录服务未初始化"
+    )
+    payload = _lead_payload(
+        name=body.name,
+        phone=body.phone,
+        city=body.city,
+        preferred_time=body.preferred_time,
+        consent=body.consent,
+        legal_domain=body.legal_domain,
+        source="transfer",
+    )
+    try:
+        saved = consultation_service.save_public(payload, source="transfer")
+    except TypeError:
+        # Simple fakes may only accept a payload dict; the payload already
+        # carries source="transfer".
+        saved = consultation_service.save_public(payload)
+    if (
+        not isinstance(saved, Mapping)
+        or saved.get("success") is False
+        or saved.get("persisted") is False
+        or str(saved.get("status") or "").upper() != "PENDING"
+    ):
+        raise HTTPException(status_code=400, detail="转人工信息不完整，请检查后重试")
     return {
-        "request_id": request_id,
+        "consultation_id": saved.get("id") or saved.get("consultation_id"),
+        "status": saved.get("status") or "PENDING",
         "message": "已收到您的转人工请求，工作人员将尽快与您联系",
-        "status": "TRANSFER_REQUESTED",
-        "priority": "HIGH",
     }
 
 
-@law_router.post("/chat")
+@law_router.post("/chat", response_model=LawChatPublicResponse)
 async def law_chat(
     body: LawChatRequest,
     request: Request,
-) -> Dict[str, Any]:
+) -> LawChatPublicResponse:
     runtime = _runtime_for(request)
     orchestrator = _require(runtime, "orchestrator", "法律咨询编排器未初始化")
-    conv_id = body.conv_id or body.conversation_id or str(uuid.uuid4())
-    request_id = body.request_id or str(uuid.uuid4())
+    conversation_id = body.conversation_id or body.conv_id or _server_token()
+    user_id = _server_token()
+    request_id = str(uuid.uuid4())
 
     memory = _get(runtime, "memory")
     context = ""
@@ -544,7 +719,7 @@ async def law_chat(
     if memory is not None and hasattr(memory, "get_context"):
         try:
             memory_call = memory.get_context(
-                body.user_id, conv_id, query=body.message
+                user_id, conversation_id, query=body.message
             )
             memory_context = (
                 await memory_call
@@ -583,25 +758,25 @@ async def law_chat(
     urgency = _value_or_none(intent_result, "urgency")
     risk_flags = _value_or_none(intent_result, "risk_flags") or []
     confidence = _float_or_zero(_value_or_none(intent_result, "confidence"))
-    source_scores = _value_or_none(intent_result, "source_scores") or {}
 
     from agents.agent_orchestrator import Request as OrcRequest
 
+    orc_body = OrcRequest(
+        message=body.message,
+        user_id=user_id,
+        conv_id=conversation_id,
+        context=context,
+        history=history,
+        entities=entities or {},
+        intent=intent,
+        intent_group=_value_or_none(intent_result, "intent_group"),
+        urgency=urgency,
+        risk_flags=list(risk_flags or []),
+        intent_confidence=confidence,
+        request_id=request_id,
+    )
+
     async def run_orchestrator() -> Any:
-        orc_body = OrcRequest(
-            message=body.message,
-            user_id=body.user_id,
-            conv_id=conv_id,
-            context=context,
-            history=history,
-            entities=entities or {},
-            intent=intent,
-            intent_group=_value_or_none(intent_result, "intent_group"),
-            urgency=urgency,
-            risk_flags=list(risk_flags or []),
-            intent_confidence=confidence,
-            request_id=request_id,
-        )
         return await orchestrator.run(orc_body)
 
     try:
@@ -615,9 +790,9 @@ async def law_chat(
         # Allow lightweight fake orchestrators that only accept a plain dict.
         run_call = orchestrator.run({
             "message": body.message,
-            "user_id": body.user_id,
-            "conv_id": conv_id,
-            "conversation_id": conv_id,
+            "user_id": user_id,
+            "conv_id": conversation_id,
+            "conversation_id": conversation_id,
             "request_id": request_id,
             "context": context,
             "history": history,
@@ -628,91 +803,114 @@ async def law_chat(
         })
         result = await run_call if inspect.isawaitable(run_call) else run_call
 
-    resolved_request_id = _value_or_none(result, "request_id") or request_id
+    resolved_request_id = request_id
     response_text = str(_value_or_none(result, "response", "") or "")
 
     if memory is not None:
-        from memory.conversation_memory import MsgRole
-
         add_message = getattr(memory, "add_message", None)
         if callable(add_message):
             for role, content in (
-                (MsgRole.USER, body.message),
-                (MsgRole.ASSISTANT, response_text),
+                (_PublicRole("user"), body.message),
+                (_PublicRole("assistant"), response_text),
             ):
-                message_call = add_message(body.user_id, conv_id, role, content)
+                message_call = add_message(user_id, conversation_id, role, content)
                 if inspect.isawaitable(message_call):
                     await message_call
         update_profile = getattr(memory, "update_profile", None)
         if callable(update_profile):
-            profile_call = update_profile(body.user_id, conv_id)
+            profile_call = update_profile(user_id, conversation_id)
             if inspect.isawaitable(profile_call):
                 await profile_call
+
     intent_value = _enum_value(_value_or_none(result, "intent", intent))
     intent_group = str(_value_or_none(result, "intent_group", "") or "")
-    agent_type = _enum_value(_value_or_none(result, "agent_type", ""))
-    primary_agent = _enum_value(_value_or_none(result, "primary_agent", agent_type))
-    agent_types = _value_or_none(result, "agent_types", []) or []
-    supporting_agents = _value_or_none(result, "supporting_agents", []) or []
-    tools_used = _value_or_none(result, "tools_used", []) or []
-    escalated = bool(_value_or_none(result, "escalated", False))
-    latency_ms = _float_or_zero(_value_or_none(result, "latency_ms", 0.0))
-    risk_flag_values = [_enum_value(item) for item in (risk_flags or [])]
-    if _value_or_none(result, "risk_flags"):
-        risk_flag_values = [
-            _enum_value(item) for item in _value_or_none(result, "risk_flags")
-        ]
+    entity_source = _value_or_none(result, "entities", entities) or entities
+    legal_domain = (
+        _first_entity_value(entity_source, "legal_domain")
+        or _first_entity_value(entity_source, "domain")
+        or intent_value
+    )
+    case_stage = _first_entity_value(entity_source, "case_stage")
+    if not case_stage:
+        case_stage = _first_entity_value(
+            _value_or_none(result, "facts", {}) or {}, "case_stage"
+        )
+
+    risk_value_source = _value_or_none(result, "risk_flags", risk_flags)
+    if isinstance(risk_value_source, (list, tuple)):
+        risk_values = [_enum_value(item) for item in risk_value_source]
+    else:
+        risk_values = _entity_list(entity_source, "risk_flags")
+        if not risk_values:
+            risk_values = _entity_list(
+                _value_or_none(result, "facts", {}) or {}, "risk_flags"
+            )
+
+    missing_facts: List[str] = []
+    missing_result = _value_or_none(result, "missing_facts")
+    if isinstance(missing_result, (list, tuple)):
+        missing_facts = [str(item) for item in missing_result]
+    else:
+        missing_result = _value_or_none(result, "missing")
+        if isinstance(missing_result, (list, tuple)):
+            missing_facts = [str(item) for item in missing_result]
+    if not missing_facts:
+        try:
+            from agents.tools import check_missing_facts
+
+            missing_result = check_missing_facts(orc_body, {})
+            if isinstance(missing_result, Mapping):
+                missing_facts = [str(item) for item in missing_result.get("missing", [])]
+        except Exception:
+            missing_facts = []
+
     consultation_draft = _value_or_none(result, "consultation_draft")
     if not isinstance(consultation_draft, Mapping):
-        consultation_draft = {
-            "request_id": resolved_request_id,
-            "intent": intent_value,
-            "intent_group": intent_group,
-            "urgency": _enum_value(urgency),
-            "risk_flags": risk_flag_values,
-            "entities": entities or {},
-            "response": response_text,
-            "status": "DRAFT",
-        }
+        consultation_draft = _value_or_none(result, "draft")
+    if not isinstance(consultation_draft, Mapping):
+        consultation_draft = _value_or_none(result, "consultation")
+    if not isinstance(consultation_draft, Mapping):
+        consultation_draft = {}
 
-    routing_reason = str(_value_or_none(result, "routing_reason", "") or "")
-    routing_confidence = _float_or_zero(
-        _value_or_none(result, "routing_confidence", 0.0)
+    draft_lawyers = (
+        _value_or_none(consultation_draft, "recommended_lawyers")
+        or _value_or_none(result, "recommended_lawyers")
     )
-    intent_confidence = _float_or_zero(
-        _value_or_none(result, "intent_confidence", confidence)
-    )
-    intent_source_scores = dict(
-        _value_or_none(result, "intent_source_scores", source_scores) or {}
-    )
-    knowledge_used = bool(_value_or_none(result, "knowledge_used", False))
+    recommended_lawyers = _sanitize_recommended_lawyers(draft_lawyers)
+    if not recommended_lawyers:
+        lawyer_service = _get(runtime, "lawyer_service")
+        recommend = getattr(lawyer_service, "recommend", None) if lawyer_service is not None else None
+        if callable(recommend):
+            try:
+                recommended = recommend(legal_domain or None, limit=3)
+                if isinstance(recommended, Mapping):
+                    recommended = recommended.get("lawyers") or recommended.get("items") or []
+                recommended_lawyers = _sanitize_recommended_lawyers(recommended)
+            except Exception:
+                recommended_lawyers = []
 
-    return {
-        "conv_id": conv_id,
-        "conversation_id": conv_id,
-        "request_id": resolved_request_id,
-        "response": response_text,
-        "intent": intent_value,
-        "intent_group": intent_group,
-        "agent_type": agent_type,
-        "agent_types": [_enum_value(item) for item in agent_types],
-        "primary_agent": primary_agent,
-        "supporting_agents": [_enum_value(item) for item in supporting_agents],
-        "tools_used": [_enum_value(item) for item in tools_used],
-        "routing_reason": routing_reason,
-        "routing_confidence": routing_confidence,
-        "escalated": escalated,
-        "latency_ms": latency_ms,
-        "knowledge_used": knowledge_used,
-        "entities": dict(
-            _value_or_none(result, "entities", entities) or {}
-        ),
-        "intent_confidence": intent_confidence,
-        "intent_source_scores": intent_source_scores,
-        "consultation_draft": dict(consultation_draft),
-        "draft": dict(consultation_draft),
-    }
+    consultation_draft_id: Optional[str] = None
+    raw_draft_id = (
+        consultation_draft.get("id")
+        or consultation_draft.get("consultation_id")
+        or _value_or_none(result, "consultation_id")
+    )
+    if raw_draft_id not in (None, ""):
+        consultation_draft_id = str(raw_draft_id)
 
+    return LawChatPublicResponse(
+        request_id=resolved_request_id,
+        conversation_id=conversation_id,
+        response=response_text,
+        intent=intent_value,
+        intent_group=intent_group,
+        legal_domain=legal_domain,
+        case_stage=case_stage,
+        risk_flags=risk_values,
+        missing_facts=missing_facts,
+        recommended_lawyers=recommended_lawyers,
+        consultation_draft_id=consultation_draft_id,
+    ).model_dump()
 
 def _value_or_none(source: Any, key: str, default: Any = None) -> Any:
     if source is None:
@@ -762,8 +960,12 @@ def list_admin_consultations(
 ) -> List[Dict[str, Any]]:
     runtime = _runtime_for(request)
     service = _require(runtime, "consultation_service", "咨询记录服务未初始化")
-    records = _optional_call(service, "list_recent", limit=limit)
-    return records if records is not None else []
+    records = _optional_call(service, "list_recent", limit=limit) or []
+    return [
+        _consultation_summary(item)
+        for item in records
+        if isinstance(item, Mapping)
+    ]
 
 
 @admin_router.get("/consultations/{record_id}")
@@ -1000,8 +1202,10 @@ law_router.include_router(admin_router)
 
 
 __all__ = [
+    "LawChatPublicResponse",
     "LawChatRequest",
     "create_law_router",
+    "LawConsultationPublicRequest",
     "LawConsultationRequest",
     "LawRuntime",
     "admin_router",

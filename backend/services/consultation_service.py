@@ -74,6 +74,7 @@ def _payload_dict(source: Any) -> Dict[str, Any]:
     data: Dict[str, Any] = {}
     for key in (
         "request_id",
+        "conversation_id",
         "user_id",
         "contact_name",
         "contact_phone",
@@ -155,10 +156,14 @@ class ConsultationService:
 
         return self._run(save, "consultation save failed")
 
-    def save_public(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    def save_public(
+        self,
+        payload: Mapping[str, Any],
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Persist only publicly submitted records with valid contact/consent."""
         data = dict(payload or {})
-        data["source"] = "public"
+        data["source"] = source or data.get("source") or "public"
 
         def save(repository: ConsultationRepository) -> Dict[str, Any]:
             if not _contact_valid(data) or not _consent(data):
@@ -192,6 +197,12 @@ class ConsultationService:
     def get_by_request_id(self, request_id: str) -> Optional[Dict[str, Any]]:
         return self._run(
             lambda repository: repository.get_by_request_id(str(request_id)),
+            "consultation read failed",
+        )
+
+    def get_by_conversation_id(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        return self._run(
+            lambda repository: repository.get_by_conversation_id(str(conversation_id)),
             "consultation read failed",
         )
 

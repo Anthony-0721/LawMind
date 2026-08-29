@@ -116,6 +116,16 @@ def _recommend_with_repository(
     terms = LAW_SPECIALTY_TERMS.get(exact_domain, ())
     finder = getattr(repository, "find_active_by_domain", None)
 
+    if not exact_domain:
+        candidates = [
+            item
+            for item in repository.list_all(active_only=True)
+            if _is_active(_record_mapping(item))
+        ]
+        candidates.sort(key=lambda item: int(item.get("sort_order") or 0))
+        safe_limit = max(0, int(limit or 3))
+        return [_public_record(item) for item in candidates[:safe_limit]]
+
     candidates: List[Dict[str, Any]] = []
     for candidate_domain in domains_to_try:
         if not candidate_domain:

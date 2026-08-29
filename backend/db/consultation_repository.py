@@ -164,6 +164,7 @@ def _record_to_dict(record: Consultation) -> Dict[str, Any]:
     return RecordDict({
         "id": record.id,
         "request_id": record.request_id,
+        "conversation_id": record.conversation_id,
         "user_id": record.user_id,
         "contact_name": record.contact_name,
         "contact_phone": record.contact_phone,
@@ -238,9 +239,38 @@ class ConsultationRepository:
         return self._save(payload)
 
     def save_public(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
-        """Persist a record submitted from the public/front-end form."""
+        """Persist a public record, upserting by conversation_id when present.
+
+        Existing conversations only refresh client-provided contact/consent and
+        scheduling fields; internal analysis fields and lifecycle status are
+        never overwritten by a repeated public submission.
+        """
         data = _normalize_payload(payload)
         data.setdefault("source", "public")
+        conversation_id = str(data.get("conversation_id") or "").strip()
+        if conversation_id:
+            existing = self.session.scalar(
+                select(Consultation)
+                .where(Consultation.conversation_id == conversation_id)
+                .order_by(
+                    Consultation.created_at.desc(),
+                    Consultation.id.desc(),
+                )
+            )
+            if existing is not None:
+                updates = self._model_fields(data)
+                for key in (
+                    "contact_name",
+                    "contact_phone",
+                    "city",
+                    "preferred_time",
+                    "consent",
+                ):
+                    if key in updates:
+                        setattr(existing, key, updates[key])
+                self._commit("consultation update failed")
+                self.session.refresh(existing)
+                return _record_to_dict(existing)
         return self._save(data)
 
     def save_sync(
@@ -326,6 +356,17 @@ class ConsultationRepository:
         record = self.session.scalar(select(Consultation).where(
             Consultation.request_id == str(request_id)
         ))
+        return _record_to_dict(record) if record is not None else None
+
+    def get_by_conversation_id(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        record = self.session.scalar(
+            select(Consultation)
+            .where(Consultation.conversation_id == str(conversation_id))
+            .order_by(
+                Consultation.created_at.desc(),
+                Consultation.id.desc(),
+            )
+        )
         return _record_to_dict(record) if record is not None else None
 
     def list_recent(self, limit: int = 50) -> List[Dict[str, Any]]:

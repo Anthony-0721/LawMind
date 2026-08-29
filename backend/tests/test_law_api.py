@@ -6,6 +6,7 @@ call is made.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -97,9 +98,14 @@ class FakeKnowledgeBase:
 class FakeIntentResult:
     intent = "dangerous_driving"
     intent_group = "criminal"
-    entities = {"legal_domain": ["dangerous_driving"], "city": ["上海"]}
+    entities = {
+        "legal_domain": ["dangerous_driving"],
+        "case_stage": ["拘留"],
+        "city": ["上海"],
+        "risk_flags": ["detention"],
+    }
     urgency = "HIGH"
-    risk_flags: List[str] = []
+    risk_flags: List[str] = ["detention"]
     confidence = 0.95
     source_scores: Dict[str, float] = {"pattern": 0.95}
 
@@ -110,7 +116,7 @@ class FakeOrchestrator:
 
     async def run(self, request: Any) -> Dict[str, Any]:
         return {
-            "request_id": getattr(request, "request_id", "req-chat"),
+            "request_id": "server-orchestrator-request",
             "response": "这是模拟的法律咨询回复（未调用 LLM）",
             "intent": "dangerous_driving",
             "agent_type": "criminal",
@@ -120,7 +126,37 @@ class FakeOrchestrator:
             "tools_used": [],
             "escalated": False,
             "latency_ms": 1.1,
+            "entities": FakeIntentResult.entities,
+            "missing_facts": ["incident_time"],
+            "recommended_lawyers": [],
+            "consultation_draft": {
+                "id": "draft-1",
+                "contact_name": "张三",
+                "contact_phone": "13800138000",
+            },
         }
+
+
+class FakeMemory:
+    def __init__(self) -> None:
+        self.get_context_user_id: Optional[str] = None
+        self.get_context_conversation_id: Optional[str] = None
+        self.messages: List[Any] = []
+        self.profile_user_id: Optional[str] = None
+
+    async def get_context(self, user_id: str, conversation_id: str, query: str):
+        self.get_context_user_id = user_id
+        self.get_context_conversation_id = conversation_id
+        return SimpleNamespace(
+            recent_messages=[],
+            to_prompt_text=lambda: "",
+        )
+
+    async def add_message(self, user_id: str, conversation_id: str, role: Any, content: str) -> None:
+        self.messages.append((user_id, conversation_id, role, content))
+
+    async def update_profile(self, user_id: str, conversation_id: str) -> None:
+        self.profile_user_id = user_id
 
 
 @pytest.fixture()
@@ -176,12 +212,22 @@ def client(
 
 def _valid_consultation() -> Dict[str, Any]:
     return {
-        "request_id": "req-public-1",
-        "contact_name": "张三",
-        "contact_phone": "13800138000",
+        "conversation_id": "conv-public-1",
+        "name": "张三",
+        "phone": "13800001234",
         "consent": True,
-        "legal_domain": "dangerous_driving",
         "city": "上海",
+        "legal_domain": "dangerous_driving",
+    }
+
+
+def _valid_transfer() -> Dict[str, Any]:
+    return {
+        "name": "李四",
+        "phone": "13900139000",
+        "consent": "是",
+        "city": "北京",
+        "legal_domain": "labor_dispute",
     }
 
 
@@ -193,28 +239,34 @@ def test_public_options_and_active_lawyers(client, lawyer_service):
     assert "CRITICAL" in data["urgency_levels"]
     assert "detention" in data["risk_flags"]
 
-    lawyer_service.create({
-        "name": "张律师",
-        "domain": "criminal",
-        "specialties": ["刑事辩护"],
-        "intro": "刑事辩护经验丰富",
-        "phone": "13800000001",
-    })
+    for index in range(4):
+        lawyer_service.create({
+            "name": f"张律师{index}",
+            "domain": "criminal",
+            "specialties": ["刑事", "辩护"],
+            "intro": "刑事辩护经验丰富",
+            "phone": f"1380000000{index}",
+        })
     lawyer_service.create({
         "name": "停用律师",
         "domain": "criminal",
+        "specialties": ["刑事"],
         "active": False,
     })
 
-    response = client.get("/law/lawyers", params={"domain": "criminal"})
+    response = client.get("/law/lawyers", params={"domain": "dangerous_driving"})
     assert response.status_code == 200
     public_lawyers = response.json()
-    assert [item["name"] for item in public_lawyers] == ["张律师"]
+    assert len(public_lawyers) == 3
+    assert "停用律师" not in [item["name"] for item in public_lawyers]
     assert all(
         set(item.keys()) == {"id", "name", "specialties", "intro"}
         for item in public_lawyers
     )
     assert "phone" not in public_lawyers[0]
+
+    all_active = client.get("/law/lawyers").json()
+    assert len(all_active) == 3
 
 
 def test_public_consultation_happy_path(client, consultation_service):
@@ -222,33 +274,95 @@ def test_public_consultation_happy_path(client, consultation_service):
     assert response.status_code == 200
     data = response.json()
     assert data["consultation_id"]
-    assert data["request_id"] == "req-public-1"
     assert data["status"] == "PENDING"
     assert data["message"]
+    assert "request_id" not in data
 
     records = consultation_service.list_recent(limit=10)
     assert len(records) == 1
     assert records[0]["status"] == "PENDING"
+    assert records[0]["conversation_id"] == "conv-public-1"
 
 
 def test_invalid_consultation_returns_422_and_no_pending(client, consultation_service):
-    response = client.post("/law/consultations", json={
-        "request_id": "req-invalid-1",
-        "contact_name": "张三",
-        "contact_phone": "13800138000",
-        "consent": False,
-    })
-    assert response.status_code == 422
+    invalid_payloads = [
+        {**_valid_consultation(), "consent": False},
+        {**_valid_consultation(), "phone": "123"},
+        {**_valid_consultation(), "consent": "maybe"},
+    ]
+    for payload in invalid_payloads:
+        response = client.post("/law/consultations", json=payload)
+        assert response.status_code == 422
     assert consultation_service.list_recent(limit=10) == []
 
-    response = client.post("/law/consultations", json={
-        "request_id": "req-invalid-2",
-        "contact_name": "张三",
-        "contact_phone": "123",
-        "consent": True,
-    })
-    assert response.status_code == 422
+
+def test_public_consultation_strict_schema_rejects_internal_fields(client, consultation_service):
+    internal_payloads = [
+        {**_valid_consultation(), "request_id": "client-req"},
+        {**_valid_consultation(), "risk_flags": ["detention"]},
+        {**_valid_consultation(), "status": "PENDING"},
+        {**_valid_consultation(), "source": "law_agent"},
+        {**_valid_consultation(), "version": 1},
+        {**_valid_consultation(), "created_at": "2026-01-01T00:00:00Z"},
+        {**_valid_consultation(), "updated_at": "2026-01-01T00:00:00Z"},
+        {**_valid_consultation(), "facts": {"foo": "bar"}},
+        {**_valid_consultation(), "consent": 1},
+        {**_valid_consultation(), "consent": [True]},
+    ]
+    for payload in internal_payloads:
+        response = client.post("/law/consultations", json=payload)
+        assert response.status_code == 422, payload
     assert consultation_service.list_recent(limit=10) == []
+
+
+def test_public_consultation_existing_conversation_updates_only_public_fields(
+    client,
+    consultation_service,
+    monkeypatch,
+):
+    monkeypatch.setenv("LAWMIND_ADMIN_PASSWORD", "admin-secret")
+    headers = {"X-Admin-Password": "admin-secret"}
+    first = client.post("/law/consultations", json={
+        "conversation_id": "conv-update-1",
+        "name": "张三",
+        "phone": "13800138000",
+        "consent": True,
+        "city": "上海",
+        "legal_domain": "dangerous_driving",
+    })
+    record_id = first.json()["consultation_id"]
+    original = consultation_service.get_by_id(record_id)
+    original_request_id = original["request_id"]
+
+    client.patch(
+        f"/law/admin/consultations/{record_id}/status",
+        json={"status": "CONTACTED"},
+        headers=headers,
+    )
+
+    second = client.post("/law/consultations", json={
+        "conversation_id": "conv-update-1",
+        "name": "李四",
+        "phone": "13900139000",
+        "consent": True,
+        "city": "北京",
+        "preferred_time": "明天上午",
+        "legal_domain": "contract_dispute",
+    })
+    assert second.status_code == 200
+    assert second.json()["consultation_id"] == record_id
+
+    records = consultation_service.list_recent(limit=10)
+    assert len(records) == 1
+    record = consultation_service.get_by_conversation_id("conv-update-1")
+    assert record["status"] == "CONTACTED"
+    assert record["contact_name"] == "李四"
+    assert record["contact_phone"] == "13900139000"
+    assert record["city"] == "北京"
+    assert record["preferred_time"] == "明天上午"
+    assert record["legal_domain"] == "dangerous_driving"
+    assert record["source"] == "public"
+    assert record["request_id"] == original_request_id
 
 
 def test_admin_auth_requires_password(client, monkeypatch):
@@ -275,6 +389,7 @@ def test_admin_consultation_crud(client, monkeypatch, consultation_service):
     detail = client.get(f"/law/admin/consultations/{record_id}", headers=headers)
     assert detail.status_code == 200
     assert detail.json()["id"] == record_id
+    assert detail.json()["contact_name"] == "张三"
 
     updated = client.patch(
         f"/law/admin/consultations/{record_id}/status",
@@ -288,6 +403,32 @@ def test_admin_consultation_crud(client, monkeypatch, consultation_service):
     assert deleted.status_code == 200
     assert deleted.json()["success"] is True
     assert consultation_service.get_by_id(record_id) is None
+
+
+def test_admin_consultation_list_masks_contact_fields(client, monkeypatch):
+    monkeypatch.setenv("LAWMIND_ADMIN_PASSWORD", "admin-secret")
+    headers = {"X-Admin-Password": "admin-secret"}
+    client.post("/law/consultations", json=_valid_consultation())
+
+    listed = client.get("/law/admin/consultations", headers=headers)
+    assert listed.status_code == 200
+    item = listed.json()[0]
+    assert set(item.keys()) == {
+        "id",
+        "name",
+        "phone",
+        "legal_domain",
+        "status",
+        "created_at",
+    }
+    assert item["name"] == "张*"
+    assert item["phone"] == "138****1234"
+    assert "contact_name" not in item
+    assert "contact_phone" not in item
+
+    details = client.get(f"/law/admin/consultations/{item['id']}", headers=headers)
+    assert details.json()["contact_name"] == "张三"
+    assert details.json()["contact_phone"] == "13800001234"
 
 
 def test_admin_lawyer_crud(client, monkeypatch):
@@ -320,6 +461,32 @@ def test_admin_lawyer_crud(client, monkeypatch):
     )
     assert toggled.status_code == 200
     assert toggled.json()["active"] is False
+
+
+def test_transfer_persists_lead(client, consultation_service):
+    response = client.post("/law/transfer", json=_valid_transfer())
+    assert response.status_code == 200
+    data = response.json()
+    assert set(data.keys()) == {"consultation_id", "status", "message"}
+    assert data["consultation_id"]
+    assert data["status"] == "PENDING"
+    assert data["message"]
+
+    records = consultation_service.list_recent(limit=10)
+    assert len(records) == 1
+    assert records[0]["status"] == "PENDING"
+    assert records[0]["source"] == "transfer"
+    assert records[0]["contact_name"] == "李四"
+    assert records[0]["contact_phone"] == "13900139000"
+
+
+def test_transfer_rejects_internal_fields(client, consultation_service):
+    response = client.post("/law/transfer", json={
+        **_valid_transfer(),
+        "request_id": "client-transfer-request",
+    })
+    assert response.status_code == 422
+    assert consultation_service.list_recent(limit=10) == []
 
 
 def test_admin_faq_crud_with_sync_fake(client, monkeypatch, faq_service):
@@ -382,22 +549,57 @@ def test_knowledge_reload_and_metrics(client, monkeypatch, faq_service):
     assert data["active_lawyers"] == 0
 
 
-def test_law_chat_uses_fake_orchestrator_without_llm():
+def test_law_chat_uses_whitelisted_response_and_server_token():
     app = FastAPI()
     app.include_router(law_router)
-    configure_app_law_services(app, orchestrator=FakeOrchestrator())
+    memory = FakeMemory()
+    configure_app_law_services(
+        app,
+        orchestrator=FakeOrchestrator(),
+        memory=memory,
+    )
     client = TestClient(app)
     response = client.post("/law/chat", json={
         "message": "我醉驾被查了",
-        "conversation_id": "conv-chat-1",
+        "conversation_id": "client-conv",
+        "user_id": "evil-user",
+        "request_id": "client-request",
     })
     assert response.status_code == 200
     data = response.json()
-    assert data["request_id"]
-    assert data["conversation_id"] == "conv-chat-1"
+    assert set(data.keys()) == {
+        "request_id",
+        "conversation_id",
+        "response",
+        "intent",
+        "intent_group",
+        "legal_domain",
+        "case_stage",
+        "risk_flags",
+        "missing_facts",
+        "recommended_lawyers",
+        "consultation_draft_id",
+    }
+    assert data["request_id"] != "client-request"
+    assert data["conversation_id"] == "client-conv"
     assert data["response"]
-    assert data["consultation_draft"]["status"] == "DRAFT"
-    assert data["draft"]["status"] == "DRAFT"
+    assert data["intent"] == "dangerous_driving"
+    assert data["case_stage"] == "拘留"
+    assert data["risk_flags"] == ["detention"]
+    assert data["missing_facts"] == ["incident_time"]
+    assert data["consultation_draft_id"] == "draft-1"
+    assert "agent_type" not in data
+    assert "entities" not in data
+    assert "phone" not in data
+
+    assert memory.get_context_user_id.startswith("lawmind-session:")
+    assert memory.get_context_user_id != "evil-user"
+    assert memory.get_context_conversation_id == "client-conv"
+    assert memory.profile_user_id.startswith("lawmind-session:")
+
+    generated = client.post("/law/chat", json={"message": "生成会话"})
+    assert generated.status_code == 200
+    assert generated.json()["conversation_id"].startswith("lawmind-session:")
 
 
 def test_admin_faq_crud_with_sqlite_and_request_scoped_sync(monkeypatch, session_factory):
