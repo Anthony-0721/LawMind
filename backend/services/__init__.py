@@ -6,7 +6,7 @@ from .consultation_service import (
     ConsultationServiceError,
     ConsultationValidationError,
 )
-from .faq_sync_service import FaqSyncService
+from .faq_sync_service import FaqSyncService, RequestScopedFaqSyncService
 from .lawyer_recommendation import (
     LAW_DOMAIN_TO_LAWYER,
     LAW_DOMAIN_TO_LAWYER_DOMAIN,
@@ -22,6 +22,7 @@ __all__ = [
     "ConsultationStoreError",
     "ConsultationValidationError",
     "FaqSyncService",
+    "RequestScopedFaqSyncService",
     "LAW_DOMAIN_TO_LAWYER",
     "LAW_DOMAIN_TO_LAWYER_DOMAIN",
     "LawyerService",

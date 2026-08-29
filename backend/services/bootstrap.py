@@ -12,7 +12,7 @@ from db.database import init_db
 from db.faq_repository import FaqRepository
 from db.lawyer_repository import LawyerRepository
 from .consultation_service import ConsultationService
-from .faq_sync_service import FaqSyncService
+from .faq_sync_service import FaqSyncService, RequestScopedFaqSyncService
 from .lawyer_recommendation import LawyerService
 
 
@@ -39,6 +39,8 @@ def bootstrap_law_data(
     faq_items = _load_seed(faq_seed_path)
     lawyer_items = _load_seed(lawyer_seed_path)
 
+    faq_sync_service = RequestScopedFaqSyncService(session_factory, knowledge_base)
+
     with session_factory() as session:
         faq_repository = FaqRepository(session)
         lawyer_repository = LawyerRepository(session)
@@ -49,10 +51,7 @@ def bootstrap_law_data(
         except Exception as exc:
             logger.warning("FAQ vector cleanup skipped: %s", type(exc).__name__)
 
-        faq_sync_results = FaqSyncService(
-            faq_repository,
-            knowledge_base,
-        ).sync_all()
+    faq_sync_results = faq_sync_service.sync_all()
 
     faq_synced = sum(
         1 for result in faq_sync_results if result.get("success") is True
@@ -64,6 +63,9 @@ def bootstrap_law_data(
         "session_factory": session_factory,
         "lawyer_service": LawyerService(session_factory),
         "consultation_service": ConsultationService(session_factory),
+        "faq_sync_service": faq_sync_service,
+        "faq_service": faq_sync_service,
+        "knowledge_base": knowledge_base,
         "faq_seeded": faq_seeded,
         "lawyer_seeded": lawyer_seeded,
         "faq_sync_results": faq_sync_results,

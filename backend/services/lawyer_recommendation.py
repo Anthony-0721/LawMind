@@ -86,6 +86,11 @@ def _public_record(record: Any) -> RecordDict:
     })
 
 
+def _staff_record(record: Any) -> RecordDict:
+    """Return the full staff lawyer record, including contact/active fields."""
+    return RecordDict(dict(_record_mapping(record)))
+
+
 def _is_active(record: Mapping[str, Any]) -> bool:
     value = record.get("active", True)
     if isinstance(value, str):
@@ -186,7 +191,6 @@ class LawyerService:
         limit: int = 3,
         include_contact: bool = False,
     ) -> List[Dict[str, Any]]:
-        del include_contact
         return self._run(
             lambda repository: _recommend_with_repository(repository, domain, limit),
             "lawyer recommendation failed",
@@ -197,10 +201,9 @@ class LawyerService:
         domain: Any,
         include_contact: bool = False,
     ) -> List[Dict[str, Any]]:
-        del include_contact
         return self._run(
             lambda repository: [
-                _public_record(item)
+                (_staff_record(item) if include_contact else _public_record(item))
                 for item in repository.find_active_by_domain(_normalize_domain(domain))
                 if _is_active(_record_mapping(item))
             ],
@@ -208,11 +211,11 @@ class LawyerService:
         )
 
     def get_by_id(self, lawyer_id: str, include_contact: bool = False) -> Optional[Dict[str, Any]]:
-        del include_contact
-
         def lookup(repository: LawyerRepository) -> Optional[Dict[str, Any]]:
             record = repository.get_by_id(str(lawyer_id))
-            return _public_record(record) if record is not None else None
+            if record is None:
+                return None
+            return _staff_record(record) if include_contact else _public_record(record)
 
         return self._run(lookup, "lawyer lookup failed")
 
@@ -221,7 +224,6 @@ class LawyerService:
         active_only: bool = True,
         include_contact: bool = False,
     ) -> List[Dict[str, Any]]:
-        del include_contact
         def list_records(repository: LawyerRepository) -> List[Dict[str, Any]]:
             records = repository.list_all(active_only=active_only)
             if active_only:
@@ -229,7 +231,10 @@ class LawyerService:
                     item for item in records
                     if _is_active(_record_mapping(item))
                 ]
-            return [_public_record(item) for item in records]
+            return [
+                (_staff_record(item) if include_contact else _public_record(item))
+                for item in records
+            ]
 
         return self._run(list_records, "lawyer lookup failed")
 
@@ -239,9 +244,12 @@ class LawyerService:
         include_contact: bool = False,
         **fields: Any,
     ) -> Dict[str, Any]:
-        del include_contact
         return self._run(
-            lambda repository: _public_record(repository.create(payload, **fields)),
+            lambda repository: (
+                _staff_record(repository.create(payload, **fields))
+                if include_contact
+                else _public_record(repository.create(payload, **fields))
+            ),
             "lawyer create failed",
         )
 
@@ -252,11 +260,11 @@ class LawyerService:
         include_contact: bool = False,
         **fields: Any,
     ) -> Optional[Dict[str, Any]]:
-        del include_contact
-
         def apply(repository: LawyerRepository) -> Optional[Dict[str, Any]]:
             record = repository.update(str(lawyer_id), payload, **fields)
-            return _public_record(record) if record is not None else None
+            if record is None:
+                return None
+            return _staff_record(record) if include_contact else _public_record(record)
 
         return self._run(apply, "lawyer update failed")
 
@@ -266,11 +274,11 @@ class LawyerService:
         active: Optional[bool] = None,
         include_contact: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        del include_contact
-
         def apply(repository: LawyerRepository) -> Optional[Dict[str, Any]]:
             record = repository.toggle(str(lawyer_id), active)
-            return _public_record(record) if record is not None else None
+            if record is None:
+                return None
+            return _staff_record(record) if include_contact else _public_record(record)
 
         return self._run(apply, "lawyer update failed")
 

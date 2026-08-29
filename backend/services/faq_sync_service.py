@@ -543,3 +543,62 @@ class FaqSyncService:
 
 
 __all__ = ["FaqSyncService"]
+
+"""Reusable request-scoped FAQ synchronization facade.
+
+FaqRepository is session-bound, so production API calls need a fresh
+repository/session per request. This facade keeps the existing
+``FaqSyncService`` contract while making it directly usable from the API.
+"""
+from typing import Any, Callable, Dict, List, Optional
+
+from db.faq_repository import FaqRepository
+
+
+class RequestScopedFaqSyncService(FaqSyncService):
+    """Create a new FAQ repository/session for each synchronization operation."""
+
+    def __init__(self, session_factory: Any, knowledge_base: Any):
+        self.session_factory = session_factory
+        self.knowledge_base = knowledge_base
+
+    def _run(self, operation: Callable[[FaqSyncService, FaqRepository], Any]) -> Any:
+        session = self.session_factory()
+        try:
+            repository = FaqRepository(session)
+            service = FaqSyncService(repository, self.knowledge_base)
+            return operation(service, repository)
+        finally:
+            session.close()
+
+    def create_record(self, payload: Any) -> Dict[str, Any]:
+        return self._run(lambda service, _: service.create_record(payload))
+
+    def update_record(self, faq_id: Any, payload: Any) -> Dict[str, Any]:
+        return self._run(lambda service, _: service.update_record(faq_id, payload))
+
+    def toggle_record(self, faq_id: Any, active: Optional[bool] = None) -> Dict[str, Any]:
+        return self._run(lambda service, _: service.toggle_record(faq_id, active))
+
+    def delete_record(self, faq_id: Any) -> Dict[str, Any]:
+        return self._run(lambda service, _: service.delete_record(faq_id))
+
+    def sync_all(self) -> List[Dict[str, Any]]:
+        return self._run(lambda service, _: service.sync_all())
+
+    def list_all(self, active_only: bool = False) -> List[Dict[str, Any]]:
+        return self._run(
+            lambda _, repository: repository.list_all(active_only=active_only)
+        )
+
+    def get_by_id(self, faq_id: Any) -> Optional[Dict[str, Any]]:
+        return self._run(lambda _, repository: repository.get_by_id(str(faq_id)))
+
+    def count(self) -> int:
+        return len(self.list_all(active_only=False))
+
+
+__all__ = [
+    "FaqSyncService",
+    "RequestScopedFaqSyncService",
+]

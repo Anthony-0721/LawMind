@@ -51,6 +51,7 @@ _evaluator    = None
 _skill_manager = None
 _lawyer_service = None
 _consultation_service = None
+_faq_sync_service = None
 _session_factory = None
 
 _LEGACY_ENV_PREFIX = "RETIRED_"
@@ -89,7 +90,7 @@ def _anthropic_cfg() -> Dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager, _lawyer_service, _consultation_service, _session_factory
+    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager, _lawyer_service, _consultation_service, _faq_sync_service, _session_factory
 
     print(BANNER, flush=True)
 
@@ -206,6 +207,32 @@ async def lifespan(app: FastAPI):
     if _orchestrator is not None:
         _orchestrator.set_shared_tools(build_shared_law_rag_tools(_tool_manager))
 
+    # 注入律所 API 服务（仅暴露给请求，不记录完整上下文）。
+    from api.law_routes import configure_app_law_services, configure_law_router
+
+    _faq_sync_service = bootstrap_context["faq_sync_service"]
+    configure_app_law_services(
+        app,
+        lawyer_service=_lawyer_service,
+        consultation_service=_consultation_service,
+        faq_sync_service=_faq_sync_service,
+        orchestrator=_orchestrator,
+        memory=_memory,
+        law_recognizer=recognizer,
+        knowledge_base=kb,
+        session_factory=_session_factory,
+    )
+    configure_law_router(
+        lawyer_service=_lawyer_service,
+        consultation_service=_consultation_service,
+        faq_sync_service=_faq_sync_service,
+        orchestrator=_orchestrator,
+        memory=_memory,
+        law_recognizer=recognizer,
+        knowledge_base=kb,
+        session_factory=_session_factory,
+    )
+
     # 性能监控（可选启动 Prometheus）
     prom_port = int(os.getenv("PROMETHEUS_PORT", "0")) or None
     _monitor = PerformanceMonitor(
@@ -250,6 +277,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 律所对外/工作人员 API：路由在服务初始化前注册，服务在 lifespan 中注入。
+from api.law_routes import law_router
+
+app.include_router(law_router)
 
 
 def _knowledge_used(result: Any) -> bool:
