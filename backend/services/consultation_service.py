@@ -13,7 +13,6 @@ from db.consultation_repository import (
 _CHINESE_MOBILE_RE = re.compile(r"^1[3-9]\d{9}$")
 _VALID_STATUSES = frozenset({"PENDING", "CONTACTED", "BOOKED", "CLOSED"})
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "是", "同意", "愿意"})
-_FALSE_TOKENS = frozenset({"0", "false", "no", "否", "不同意", "不愿意"})
 
 
 class ConsultationServiceError(ConsultationStoreError):
@@ -29,8 +28,7 @@ def _as_bool(value: Any) -> bool:
         normalized = value.strip().lower()
         if normalized in _TRUE_TOKENS:
             return True
-        if normalized in _FALSE_TOKENS:
-            return False
+        return False
     return bool(value)
 
 
@@ -146,7 +144,12 @@ class ConsultationService:
 
         def save(repository: ConsultationRepository) -> Dict[str, Any]:
             if not _contact_valid(data) or not _consent(data):
-                return _draft_record(data, "law_agent")
+                return {
+                    "success": False,
+                    "persisted": False,
+                    "status": "DRAFT",
+                    "error": "consultation_incomplete",
+                }
             data["status"] = "PENDING"
             return repository.save_from_agent(data)
 
@@ -159,9 +162,12 @@ class ConsultationService:
 
         def save(repository: ConsultationRepository) -> Dict[str, Any]:
             if not _contact_valid(data) or not _consent(data):
-                raise ConsultationValidationError(
-                    "public consultation requires valid contact and consent"
-                )
+                return {
+                    "success": False,
+                    "persisted": False,
+                    "status": "DRAFT",
+                    "error": "consultation_incomplete",
+                }
             data["status"] = "PENDING"
             return repository.save_public(data)
 

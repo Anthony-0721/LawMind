@@ -25,9 +25,19 @@ class ConsultationStoreError(Exception):
     """Sanitized database failure raised without bound PII."""
 
 
+_TRUE_CONSENT_TOKENS = frozenset({"1", "true", "yes", "是", "同意", "愿意"})
+_FALSE_CONSENT_TOKENS = frozenset({"0", "false", "no", "否", "不同意", "不愿意"})
+_VALID_CONSULTATION_STATUSES = frozenset({"PENDING", "CONTACTED", "BOOKED", "CLOSED"})
+
+
 def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "是", "同意"}
+        normalized = value.strip().lower()
+        if normalized in _TRUE_CONSENT_TOKENS:
+            return True
+        if normalized in _FALSE_CONSENT_TOKENS:
+            return False
+        return False
     return bool(value)
 
 
@@ -330,10 +340,13 @@ class ConsultationRepository:
     # ── Update / Delete ───────────────────────────────────────────────────
 
     def update_status(self, record_id: str, status: str) -> Optional[Dict[str, Any]]:
+        normalized = str(status or "").strip().upper()
+        if normalized not in _VALID_CONSULTATION_STATUSES:
+            raise ValueError("invalid consultation status")
         record = self.session.get(Consultation, str(record_id))
         if record is None:
             return None
-        record.status = str(status)
+        record.status = normalized
         self._commit("consultation update failed")
         self.session.refresh(record)
         return _record_to_dict(record)

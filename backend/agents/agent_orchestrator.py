@@ -185,6 +185,26 @@ def _entity_value(req: Request, key: str, default: str = "") -> str:
     return default
 
 
+_TRUE_CONSENT_TOKENS = frozenset({"1", "true", "yes", "是", "同意", "愿意"})
+
+
+def _parse_consent(value: Any) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_CONSENT_TOKENS:
+            return True
+        return False
+    return bool(value)
+
+
+def _is_persisted_consultation(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("success") is False or result.get("persisted") is False:
+        return False
+    return result.get("status") == "PENDING"
+
+
 def _request_contact_args(req: Request) -> Dict[str, Any]:
     name = _entity_value(req, "contact_name", "") or _entity_value(req, "name", "")
     phone = _entity_value(req, "contact_phone", "") or _entity_value(req, "phone", "")
@@ -205,10 +225,7 @@ def _request_contact_args(req: Request) -> Dict[str, Any]:
         case_stage = case_stage or str(contact.get("case_stage") or "")
         if not consent_raw:
             consent_raw = contact.get("consent", False)
-    if isinstance(consent_raw, str):
-        consent = consent_raw.strip().lower() in {"1", "true", "yes", "是"}
-    else:
-        consent = bool(consent_raw)
+    consent = _parse_consent(consent_raw)
     return {
         "name": name,
         "phone": phone,
@@ -772,12 +789,11 @@ class EscalationAgent(BaseAgent):
         urgency = req.urgency.name if req.urgency else "UNKNOWN"
         risk_values = [flag.value for flag in req.risk_flags]
         entities = json.dumps(req.entities or {}, ensure_ascii=False)
+        consultation_recorded = False
         content = (
             "已收到您的法律咨询。为保障您的权益，现将该问题标记为转人工处理。\n\n"
             f"升级原因：意图={intent}，紧急度={urgency}\n"
             f"风险信号：{', '.join(risk_values) if risk_values else '暂无'}\n"
-            f"已记录信息：{entities}\n"
-            "人工客服或律师会根据会话记录继续核验。请不要发送身份证号、银行卡号或短信验证码等敏感信息。"
         )
         tools = self.get_tools()
         tools_used: List[str] = []
@@ -827,7 +843,7 @@ class EscalationAgent(BaseAgent):
             create_args = dict(contact_args)
             create_args["recommended_lawyers"] = recommended_lawyers
             create_args["legal_domain"] = legal_domain
-            _, trace = await self._invoke_available_tool(
+            create_result, trace = await self._invoke_available_tool(
                 "create_consultation_record",
                 req,
                 create_args,
@@ -835,8 +851,19 @@ class EscalationAgent(BaseAgent):
             )
             if trace is not None:
                 tool_traces.append(trace)
-                if trace.get("success") is not False and trace.get("result_success") is not False:
+                if (
+                    trace.get("success") is not False
+                    and trace.get("result_success") is not False
+                    and _is_persisted_consultation(create_result)
+                ):
                     tools_used.append("create_consultation_record")
+                    consultation_recorded = True
+
+        if consultation_recorded:
+            content += f"已记录信息：{entities}\n"
+        else:
+            content += "咨询记录暂未保存，请保持会话以便人工客服跟进。\n"
+        content += "人工客服或律师会根据会话记录继续核验。请不要发送身份证号、银行卡号或短信验证码等敏感信息。\n"
 
         self._last_tools_used = tools_used
         self._last_tool_traces = tool_traces

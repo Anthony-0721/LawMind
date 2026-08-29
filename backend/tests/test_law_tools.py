@@ -396,12 +396,22 @@ def test_consultation_draft_status_requires_contact_and_consent():
     no_consent = create_consultation_record(
         req, {**valid_contact, "consent": False}, consultation_service=FakeConsultationService()
     )
-    assert no_consent["status"] == "DRAFT"
+    assert no_consent == {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
 
     invalid_contact = create_consultation_record(
         req, {"consent": True}, consultation_service=FakeConsultationService()
     )
-    assert invalid_contact["status"] == "DRAFT"
+    assert invalid_contact == {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
 
     pending = create_consultation_record(
         req, {**valid_contact, "consent": True}, consultation_service=FakeConsultationService()
@@ -484,7 +494,9 @@ def test_contract_intents_are_plain_strings():
     assert type(build_reception_summary(req, {})["intent"]) is str
     assert type(build_handoff_summary(req, {})["intent"]) is str
     result = create_consultation_record(
-        req, {}, consultation_service=FakeConsultationService()
+        req,
+        {"contact": {"name": "张三", "phone": "13800138000"}, "consent": True},
+        consultation_service=FakeConsultationService(),
     )
     assert type(result["legal_domain"]) is str
 
@@ -493,7 +505,13 @@ def test_create_consultation_record_uses_args_legal_domain():
     req = make_request(intent=LawIntent.DANGEROUS_DRIVING)
 
     draft = create_consultation_record(
-        req, {"legal_domain": "civil"}, consultation_service=FakeConsultationService()
+        req,
+        {
+            "contact": {"name": "张三", "phone": "13800138000"},
+            "consent": True,
+            "legal_domain": "civil",
+        },
+        consultation_service=FakeConsultationService(),
     )
 
     assert draft["legal_domain"] == "civil"
@@ -548,7 +566,13 @@ def test_legal_domain_args_override_entities_in_resolver_recommend_and_record():
     assert recommendation == [{"legal_domain": "civil"}]
 
     draft = create_consultation_record(
-        req, {"legal_domain": "civil"}, consultation_service=FakeConsultationService()
+        req,
+        {
+            "contact": {"name": "张三", "phone": "13800138000"},
+            "consent": True,
+            "legal_domain": "civil",
+        },
+        consultation_service=FakeConsultationService(),
     )
     assert draft["legal_domain"] == "civil"
 

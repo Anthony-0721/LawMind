@@ -569,8 +569,7 @@ def _as_bool(value: Any) -> bool:
         normalized = value.strip().lower()
         if normalized in {"1", "true", "yes", "是", "同意", "愿意"}:
             return True
-        if normalized in {"0", "false", "no", "否", "不同意", "不愿意"}:
-            return False
+        return False
     return bool(value)
 
 
@@ -677,7 +676,12 @@ def create_consultation_record(
                 "error": "consultation_save_failed",
                 "persisted": False,
             }
-    return draft
+    return {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
 
 
 def build_handoff_summary(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:

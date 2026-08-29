@@ -9,7 +9,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from agents.agent_orchestrator import AgentOrchestrator, AgentType, Request
+import asyncio
+
+from agents.agent_orchestrator import AgentOrchestrator, AgentType, EscalationAgent, Request
 from agents.tools import build_escalation_tools, create_consultation_record
 from core.law_domain import LawIntent
 from db.consultation_repository import ConsultationRepository
@@ -113,6 +115,25 @@ def _complete_args() -> Dict[str, Any]:
         "city": "上海",
         "preferred_time": "2026-09-01 10:00",
         "legal_domain": "dangerous_driving",
+    }
+
+
+def _incomplete_fallback() -> Dict[str, Any]:
+    return {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
+
+
+def _valid_consent_fallback_payload(request_id: str) -> Dict[str, Any]:
+    return {
+        "request_id": request_id,
+        "contact_name": "张*",
+        "contact_phone": "13800138000",
+        "legal_domain": "dangerous_driving",
+        "city": "上海",
     }
 
 
@@ -253,10 +274,20 @@ def test_consultation_service_opens_session_per_public_method(session_factory):
 def test_public_save_requires_valid_contact_and_consent(session_factory):
     service = ConsultationService(session_factory)
 
-    with pytest.raises(ConsultationValidationError):
-        service.save_public({**_valid_consultation_payload(), "contact_phone": "123"})
-    with pytest.raises(ConsultationValidationError):
-        service.save_public({**_valid_consultation_payload(), "consent": False})
+    invalid_phone = service.save_public({**_valid_consultation_payload(), "contact_phone": "123"})
+    assert invalid_phone == {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
+    no_consent = service.save_public({**_valid_consultation_payload(), "consent": False})
+    assert no_consent == {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
 
     saved = service.save_public(_valid_consultation_payload())
     assert saved["status"] == "PENDING"
@@ -272,7 +303,12 @@ def test_agent_save_returns_draft_without_consent_and_does_not_persist(session_f
         "legal_domain": "dangerous_driving",
     })
 
-    assert draft["status"] == "DRAFT"
+    assert draft == {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
     assert service.list_recent(10) == []
 
 
@@ -364,16 +400,16 @@ def test_chinese_consent_values(session_factory):
     })
     assert accepted_yes["status"] == "PENDING"
 
-    with pytest.raises(ConsultationValidationError):
-        service.save_public({
-            **_valid_consultation_payload("req-consent-no"),
-            "consent": "不同意",
-        })
-    with pytest.raises(ConsultationValidationError):
-        service.save_public({
-            **_valid_consultation_payload("req-consent-no2"),
-            "consent": "否",
-        })
+    rejected = service.save_public({
+        **_valid_consent_fallback_payload("req-consent-no"),
+        "consent": "不同意",
+    })
+    assert rejected == _incomplete_fallback()
+    rejected = service.save_public({
+        **_valid_consent_fallback_payload("req-consent-no2"),
+        "consent": "否",
+    })
+    assert rejected == _incomplete_fallback()
 
 
 # ── Escalation tool integration ──────────────────────────────────────────────
@@ -414,7 +450,12 @@ def test_build_escalation_tools_keeps_draft_without_consent(session_factory):
     args["consent"] = False
     result = tools["create_consultation_record"].handler(_request(), args)
 
-    assert result["status"] == "DRAFT"
+    assert result == {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
     assert service.list_recent(10) == []
 
 
@@ -427,10 +468,114 @@ def test_tool_parser_accepts_chinese_consent(session_factory):
 
     args = _complete_args()
     args["consent"] = "愿意"
-    result = tools["create_consultation_record"].handler(_request(), args)
+    req = _request()
+    result = tools["create_consultation_record"].handler(req, args)
 
     assert result["status"] == "PENDING"
+    assert result["consent"] is True
     assert len(service.list_recent(10)) == 1
+    saved = service.get_by_request_id(req.request_id)
+    assert saved is not None
+    assert saved["consent"] is True
+
+
+def test_unknown_consent_does_not_create_pending(session_factory):
+    service = ConsultationService(session_factory)
+    tools = build_escalation_tools(
+        consultation_service=service,
+        lawyer_service=_FakeLawyerService(),
+    )
+
+    args = _complete_args()
+    args["consent"] = "maybe"
+    result = tools["create_consultation_record"].handler(_request(), args)
+
+    assert result == {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
+    assert service.list_recent(10) == []
+
+
+def test_agent_service_incomplete_returns_fallback(session_factory):
+    service = ConsultationService(session_factory)
+    result = service.save_from_agent({
+        "request_id": "req-incomplete",
+        "contact_name": "张三",
+        "contact_phone": "13800138000",
+        "consent": "unknown",
+        "legal_domain": "dangerous_driving",
+    })
+
+    assert result == {
+        "success": False,
+        "persisted": False,
+        "status": "DRAFT",
+        "error": "consultation_incomplete",
+    }
+    assert service.list_recent(10) == []
+
+
+def test_escalation_persists_chinese_consent_end_to_end(session_factory):
+    service = ConsultationService(session_factory)
+    req = Request(
+        message="我愿意留资并预约律师",
+        user_id="test-user",
+        conv_id="conv-1",
+        request_id="req-persisted-consent",
+        intent=LawIntent.LAWYER_APPOINTMENT,
+        contact_name="张三",
+        contact_phone="13800138000",
+        consent="愿意",
+    )
+    agent = EscalationAgent(
+        _NoopClient(),
+        "test-model",
+        lawyer_service=_FakeLawyerService(),
+        consultation_service=service,
+    )
+    result = asyncio.run(agent.handle(req))
+
+    assert "create_consultation_record" in result.tools_used
+    assert "已记录信息" in result.content
+    saved = service.get_by_request_id(req.request_id)
+    assert saved is not None
+    assert saved["consent"] is True
+
+
+def test_escalation_does_not_mark_create_used_when_not_persisted():
+    class NotPersistedConsultationService:
+        def save_from_agent(self, payload):
+            return {
+                **payload,
+                "success": False,
+                "persisted": False,
+                "status": "DRAFT",
+                "error": "consultation_incomplete",
+            }
+
+    req = Request(
+        message="我愿意留资并预约律师",
+        user_id="test-user",
+        conv_id="conv-1",
+        request_id="req-not-persisted",
+        intent=LawIntent.LAWYER_APPOINTMENT,
+        contact_name="张三",
+        contact_phone="13800138000",
+        consent="愿意",
+    )
+    agent = EscalationAgent(
+        _NoopClient(),
+        "test-model",
+        lawyer_service=_FakeLawyerService(),
+        consultation_service=NotPersistedConsultationService(),
+    )
+    result = asyncio.run(agent.handle(req))
+
+    assert "create_consultation_record" not in result.tools_used
+    assert "已记录信息" not in result.content
 
 
 # ── Orchestrator and bootstrap ───────────────────────────────────────────────

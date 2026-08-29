@@ -93,6 +93,21 @@ def test_consultation_save_from_agent_and_idempotent_request_id(session):
     assert len(repo.list_recent(100)) == 1
 
 
+def test_consultation_update_status_rejects_invalid_status(session):
+    repo = ConsultationRepository(session)
+    saved = repo.save_public({
+        "request_id": "req-status-invalid",
+        "contact_name": "张*",
+        "contact_phone": "13800138000",
+        "consent": True,
+        "legal_domain": "dangerous_driving",
+    })
+
+    with pytest.raises(ValueError):
+        repo.update_status(saved["id"], "INVALID")
+    assert repo.get_by_id(saved["id"])["status"] == "PENDING"
+
+
 def test_consultation_duplicate_request_id_preserves_status(session):
     repo = ConsultationRepository(session)
     payload = {
