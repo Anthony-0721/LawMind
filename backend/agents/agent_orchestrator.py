@@ -36,6 +36,7 @@ from agents.tools import (
     criminal_tools,
     escalation_tools,
     reception_tools,
+    validate_contact,
 )
 from core.intent_recognizer import LawIntentRecognizer, UrgencyLevel
 from core.law_domain import LawIntent, LawRiskFlag
@@ -135,6 +136,70 @@ class Request:
     risk_flags:  List[LawRiskFlag] = field(default_factory=list)
     intent_confidence: float = 1.0
     request_id:  str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    contact_name: str = ""
+    contact_phone: str = ""
+    name: str = ""
+    phone: str = ""
+    contact: Dict[str, Any] = field(default_factory=dict)
+    city: str = ""
+    preferred_time: str = ""
+    case_stage: str = ""
+    consent: bool = False
+
+
+def _entity_value(req: Request, key: str, default: str = "") -> str:
+    raw = getattr(req, key, None)
+    if raw not in (None, ""):
+        return str(raw)
+    values = (getattr(req, "entities", None) or {}).get(key)
+    if values:
+        first = values[0] if isinstance(values, (list, tuple)) else values
+        if first not in (None, ""):
+            return str(first)
+    if req.context:
+        try:
+            parsed = json.loads(req.context)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            value = parsed.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return default
+
+
+def _request_contact_args(req: Request) -> Dict[str, Any]:
+    name = _entity_value(req, "contact_name", "") or _entity_value(req, "name", "")
+    phone = _entity_value(req, "contact_phone", "") or _entity_value(req, "phone", "")
+    contact = getattr(req, "contact", None)
+    if isinstance(contact, dict):
+        name = name or str(contact.get("contact_name") or contact.get("name") or "")
+        phone = phone or str(contact.get("contact_phone") or contact.get("phone") or "")
+    city = _entity_value(req, "city", "")
+    preferred_time = _entity_value(req, "preferred_time", "")
+    case_stage = _entity_value(req, "case_stage", "")
+    consent_raw = getattr(req, "consent", False)
+    if not consent_raw:
+        consent_raw = _entity_value(req, "consent", "")
+    if isinstance(contact, dict):
+        city = city or str(contact.get("city") or "")
+        preferred_time = preferred_time or str(contact.get("preferred_time") or "")
+        case_stage = case_stage or str(contact.get("case_stage") or "")
+        if not consent_raw:
+            consent_raw = contact.get("consent", False)
+    if isinstance(consent_raw, str):
+        consent = consent_raw.strip().lower() in {"1", "true", "yes", "是"}
+    else:
+        consent = bool(consent_raw)
+    return {
+        "name": name,
+        "phone": phone,
+        "contact": {"name": name, "phone": phone} if name and phone else {},
+        "consent": consent,
+        "city": city,
+        "preferred_time": preferred_time,
+        "case_stage": case_stage,
+    }
 
 
 @dataclass
@@ -202,6 +267,65 @@ class BaseAgent:
 
     def set_shared_tools(self, tools: Optional[Dict[str, AgentToolSpec]]) -> None:
         self._shared_tools = dict(tools or {})
+
+    @staticmethod
+    def _redact_pii(payload: Any) -> Any:
+        """Return a copy with PII fields masked for tool traces."""
+        if not isinstance(payload, dict):
+            return payload
+        redacted: Dict[str, Any] = {}
+        sensitive_keys = {"contact_name", "name", "phone", "contact_phone"}
+        for key, value in payload.items():
+            if key == "contact" and isinstance(value, dict):
+                redacted[key] = BaseAgent._redact_pii(value)
+            elif key in sensitive_keys:
+                redacted[key] = "***"
+            else:
+                redacted[key] = value
+        return redacted
+
+    async def _invoke_available_tool(
+        self,
+        name: str,
+        req: Request,
+        args: Dict[str, Any],
+        tool_use_id: str,
+    ) -> tuple[Optional[Any], Optional[Dict[str, Any]]]:
+        """Invoke a whitelisted tool without requiring an LLM round trip."""
+        spec = self.get_tools().get(name)
+        if spec is None:
+            return None, None
+        tool_t0 = time.monotonic()
+        call_success = True
+        result_success: Optional[bool] = None
+        error_text = ""
+        result: Any = None
+        try:
+            result = spec.handler(req, args)
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, dict) and "success" in result:
+                result_success = bool(result.get("success"))
+            else:
+                result_success = True
+        except Exception as ex:
+            call_success = False
+            result_success = False
+            error_text = str(ex)
+            result = {"success": False, "error": error_text}
+        trace = {
+            "agent_type": self.agent_type.value,
+            "tool_name": name,
+            "tool_use_id": tool_use_id,
+            "input": self._redact_pii(dict(args or {})),
+            "success": call_success,
+            "result_success": result_success,
+            "latency_ms": round((time.monotonic() - tool_t0) * 1000, 1),
+            "cached": bool(result.get("cached")) if isinstance(result, dict) else False,
+            "reranked": bool(result.get("reranked")) if isinstance(result, dict) else False,
+            "error": error_text,
+        }
+        return result, trace
 
     async def handle(self, req: Request) -> AgentResponse:
         t0 = time.monotonic()
@@ -277,6 +401,7 @@ class BaseAgent:
             tool_uses = [block for block in (resp.content or []) if self._block_type(block) == "tool_use"]
             if not tool_uses:
                 self._last_tools_used = tools_used
+                self._last_tool_traces = tool_traces
                 return extract_text_content(resp.content)
 
             messages.append({"role": "assistant", "content": resp.content})
@@ -300,9 +425,10 @@ class BaseAgent:
                         result = spec.handler(req, args)
                         if inspect.isawaitable(result):
                             result = await result
-                        tools_used.append(name)
                         if isinstance(result, dict) and "success" in result:
                             result_success = bool(result.get("success"))
+                        if call_success and result_success is not False:
+                            tools_used.append(name)
                     except Exception as ex:
                         call_success = False
                         logger.warning("Agent 工具 %s 执行失败: %s", name, ex)
@@ -316,7 +442,7 @@ class BaseAgent:
                         "agent_type": self.agent_type.value,
                         "tool_name": name,
                         "tool_use_id": tool_use_id,
-                        "input": dict(args),
+                        "input": self._redact_pii(dict(args)),
                         "success": call_success,
                         "result_success": result_success,
                         "latency_ms": round(tool_latency_ms, 1),
@@ -360,7 +486,7 @@ class BaseAgent:
         unknown = set(args) - set(properties)
         if unknown and schema.get("additionalProperties") is False:
             raise ValueError(f"不允许的工具参数: {', '.join(sorted(unknown))}")
-        type_map = {"string": str, "number": (int, float), "integer": int, "boolean": bool}
+        type_map = {"string": str, "number": (int, float), "integer": int, "boolean": bool, "array": list, "object": dict}
         for key, value in args.items():
             expected = properties.get(key, {}).get("type")
             if expected in type_map and not isinstance(value, type_map[expected]):
@@ -579,11 +705,22 @@ class EscalationAgent(BaseAgent):
         "只确认原因、整理摘要并引导用户联系人工客服或预约律师。"
     )
 
+    def __init__(
+        self,
+        client: AsyncAnthropic,
+        model: str,
+        skill_manager: Optional[Any] = None,
+        profile: Optional[AgentProfile] = None,
+        lawyer_service: Optional[Any] = None,
+    ):
+        super().__init__(client, model, skill_manager, profile)
+        self._lawyer_service = lawyer_service
+
     def get_tools(self) -> Dict[str, AgentToolSpec]:
         tools = dict(super().get_tools())
         if "search_law_knowledge" not in tools:
             tools.update(build_shared_law_rag_tools(None))
-        tools.update(escalation_tools())
+        tools.update(escalation_tools(self._lawyer_service))
         return tools
 
     async def handle(self, req: Request) -> AgentResponse:
@@ -600,6 +737,61 @@ class EscalationAgent(BaseAgent):
             f"已记录信息：{entities}\n"
             "人工客服或律师会根据会话记录继续核验。请不要发送身份证号、银行卡号或短信验证码等敏感信息。"
         )
+        tools = self.get_tools()
+        tools_used: List[str] = []
+        tool_traces: List[Dict[str, Any]] = []
+        recommended_lawyers: List[Dict[str, Any]] = []
+
+        if "recommend_lawyer" in tools:
+            recommend_args = {
+                "legal_domain": req.intent.value if req.intent else "unknown"
+            }
+            recommend_result, trace = await self._invoke_available_tool(
+                "recommend_lawyer",
+                req,
+                recommend_args,
+                "escalation-recommend",
+            )
+            if trace is not None:
+                tools_used.append("recommend_lawyer")
+                tool_traces.append(trace)
+                if isinstance(recommend_result, list):
+                    recommended_lawyers = recommend_result
+                elif isinstance(recommend_result, dict):
+                    recommended_lawyers = list(recommend_result.get("lawyers") or [])
+
+        contact_args = _request_contact_args(req)
+        if "build_handoff_summary" in tools:
+            _, trace = await self._invoke_available_tool(
+                "build_handoff_summary",
+                req,
+                contact_args,
+                "escalation-handoff-summary",
+            )
+            if trace is not None:
+                tools_used.append("build_handoff_summary")
+                tool_traces.append(trace)
+
+        contact_valid = bool(contact_args.get("name") and contact_args.get("phone"))
+        if contact_valid:
+            contact_valid = validate_contact(req, contact_args)["valid"]
+
+        if contact_valid and contact_args.get("consent") and "create_consultation_record" in tools:
+            create_args = dict(contact_args)
+            create_args["recommended_lawyers"] = recommended_lawyers
+            create_args["legal_domain"] = req.intent.value if req.intent else "unknown"
+            _, trace = await self._invoke_available_tool(
+                "create_consultation_record",
+                req,
+                create_args,
+                "escalation-create-record",
+            )
+            if trace is not None:
+                tools_used.append("create_consultation_record")
+                tool_traces.append(trace)
+
+        self._last_tools_used = tools_used
+        self._last_tool_traces = tool_traces
         ms = (time.monotonic() - t0) * 1000
         self.stats.success += 1
         self.stats.total_ms += ms
@@ -609,7 +801,8 @@ class EscalationAgent(BaseAgent):
             success=True,
             latency_ms=ms,
             escalate=True,
-            tools_used=[],
+            tools_used=tools_used,
+            tool_traces=tool_traces,
         )
 
 
@@ -684,6 +877,7 @@ class AgentOrchestrator:
         skill_manager: Optional[Any] = None,
         rag_tool_manager: Optional[Any] = None,
         client: Optional[Any] = None,
+        lawyer_service: Optional[Any] = None,
     ):
         if client is None:
             kwargs: Dict[str, Any] = {"api_key": api_key}
@@ -702,7 +896,7 @@ class AgentOrchestrator:
             AgentType.RECEPTION: [self._make_agent(ReceptionAgent, client, model, skill_manager)],
             AgentType.CRIMINAL: [self._make_agent(CriminalDefenseAgent, client, model, skill_manager)],
             AgentType.CIVIL: [self._make_agent(CivilConsultationAgent, client, model, skill_manager)],
-            AgentType.ESCALATION: [self._make_agent(EscalationAgent, client, model, skill_manager)],
+            AgentType.ESCALATION: [self._make_agent(EscalationAgent, client, model, skill_manager, lawyer_service=lawyer_service)],
         }
         self.set_shared_tools(build_shared_law_rag_tools(rag_tool_manager))
 
@@ -712,6 +906,7 @@ class AgentOrchestrator:
         client: AsyncAnthropic,
         default_model: str,
         skill_manager: Optional[Any],
+        lawyer_service: Optional[Any] = None,
     ) -> BaseAgent:
         """按角色创建 Agent，并允许用环境变量覆盖该角色的模型。
 
@@ -721,7 +916,10 @@ class AgentOrchestrator:
         env_name = f"legacy_{agent_cls.agent_type.value.upper()}_MODEL"
         model = os.getenv(env_name, "").strip() or profile.model
         configured_profile = replace(profile, model=model) if model else profile
-        return agent_cls(client, default_model, skill_manager, profile=configured_profile)
+        kwargs: Dict[str, Any] = {"profile": configured_profile}
+        if agent_cls is EscalationAgent:
+            kwargs["lawyer_service"] = lawyer_service
+        return agent_cls(client, default_model, skill_manager, **kwargs)
 
     def set_skill_manager(self, skill_manager: Optional[Any]) -> None:
         """更新 SkillManager 引用，供运行时重载或测试替换使用。"""

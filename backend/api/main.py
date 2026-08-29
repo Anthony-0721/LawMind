@@ -1,5 +1,5 @@
 """
-LawMind 智能客服系统 — FastAPI 入口
+LawMind 律所多 Agent 咨询系统 — FastAPI 入口
 
 启动时打印小熊饼干图案。
 所有核心组件在 lifespan 中初始化，通过环境变量配置。
@@ -37,7 +37,7 @@ BANNER = r"""
     ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ
    ╔══════════════════════╗
    ║   LawMind  v2.0     ║
-   ║   智能客服 AI 系统    ║
+   ║   律所多 Agent 咨询系统    ║
    ╚══════════════════════╝
     ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ
 """
@@ -189,7 +189,7 @@ async def lifespan(app: FastAPI):
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="LawMind 智能客服",
+    title="LawMind 律所多 Agent 咨询",
     version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
@@ -201,6 +201,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _knowledge_used(result: Any) -> bool:
+    """True only when a search_law_knowledge tool call completed successfully."""
+    traces = getattr(result, "tool_traces", None)
+    if traces is None and isinstance(result, dict):
+        traces = result.get("tool_traces", [])
+    return any(
+        trace.get("tool_name") == "search_law_knowledge"
+        and trace.get("success", True) is not False
+        and trace.get("result_success", trace.get("success", True)) is True
+        for trace in (traces or [])
+    )
 
 
 # ── 请求/响应模型 ─────────────────────────────────────────────────────────────
@@ -333,7 +346,7 @@ async def chat(req: ChatRequest):
         routing_confidence=result.routing_confidence,
         escalated=result.escalated,
         latency_ms=round(result.latency_ms, 1),
-        knowledge_used="search_law_knowledge" in result.tools_used,
+        knowledge_used=_knowledge_used(result),
         entities=intent_result.entities,
         intent_confidence=round(intent_result.confidence, 4),
         intent_source_scores=intent_result.source_scores,
@@ -383,23 +396,28 @@ def _should_use_knowledge(message: str, intent=None) -> bool:
     if not msg:
         return False
     intent_value = getattr(intent, "value", intent)
-    if intent_value in {"greeting", "feedback", "escalation", "human_handoff", "other"}:
-        return False
+    if intent_value in {"other", "law_firm_service"}:
+        return True
     if intent_value in {
-        "query", "request", "technical", "billing", "account", "complaint",
-        "order_status", "logistics", "refund", "invoice", "payment_issue",
-        "account_security", "technical_login", "technical_crash",
+        "dangerous_driving",
+        "criminal_defense",
+        "labor_dispute",
+        "marriage_family",
+        "contract_dispute",
+        "traffic_accident",
+        "civil_loan",
+        "lawyer_appointment",
     }:
         return True
     greetings = {"你好", "您好", "嗨", "hi", "hello", "hey", "早上好", "晚上好"}
     if msg in greetings:
         return False
-    business_keywords = [
-        "退款", "订单", "物流", "配送", "发票", "扣款", "支付", "账单", "订阅",
-        "登录", "报错", "错误", "崩溃", "会员", "积分", "账户", "密码", "地址",
-        "refund", "order", "invoice", "payment", "error", "login",
+    law_keywords = [
+        "醉驾", "酒驾", "刑事", "拘留", "取保", "开庭", "辩护",
+        "劳动", "工资", "仲裁", "离婚", "抚养", "合同", "违约",
+        "交通事故", "车祸", "借贷", "借条", "欠款", "律师",
     ]
-    return len(msg) >= 4 or any(kw in msg for kw in business_keywords)
+    return len(msg) >= 4 or any(kw in msg for kw in law_keywords)
 
 
 @app.get("/monitor")
@@ -492,8 +510,8 @@ async def add_knowledge(body: BatchDocInput):
     ```json
     {
       "documents": [
-        {"title": "退款政策", "content": "用户在购买后 7 天内可以申请无理由退款..."},
-        {"title": "配送说明", "content": "标准配送 3-5 个工作日..."}
+        {"title": "醉驾咨询", "content": "醉驾案件通常涉及刑事程序..."},
+        {"title": "劳动仲裁流程", "content": "劳动争议可先申请劳动仲裁..."}
       ]
     }
     ```

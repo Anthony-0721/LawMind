@@ -58,6 +58,11 @@ def make_request(
     urgency: UrgencyLevel = UrgencyLevel.HIGH,
     risk_flags: Optional[List[LawRiskFlag]] = None,
     entities: Optional[Dict[str, Any]] = None,
+    contact_name: str = "",
+    contact_phone: str = "",
+    city: str = "",
+    preferred_time: str = "",
+    consent: bool = False,
 ) -> Request:
     return Request(
         message=message,
@@ -69,6 +74,11 @@ def make_request(
         urgency=urgency,
         risk_flags=list(risk_flags or []),
         entities=dict(entities or {}),
+        contact_name=contact_name,
+        contact_phone=contact_phone,
+        city=city,
+        preferred_time=preferred_time,
+        consent=consent,
     )
 
 
@@ -278,17 +288,30 @@ def test_create_consultation_record_draft_contract():
         {
             "recommended_lawyers": [{"id": "lawyer-1"}],
             "contact": {"name": "张三", "phone": "13800138000"},
+            "consent": True,
+            "city": "上海",
+            "preferred_time": "2026-09-01 10:00",
         },
     )
 
     assert draft["request_id"] == "req-123"
     assert draft["user_id"] == "test-user"
-    assert draft["legal_domain"] == LawIntent.DANGEROUS_DRIVING
-    assert draft["risk_flags"] == req.risk_flags
+    assert draft["legal_domain"] == "dangerous_driving"
+    assert isinstance(draft["legal_domain"], str)
+    assert draft["risk_flags"] == ["detention", "no_lawyer"]
+    assert isinstance(draft["case_stage"], str)
+    assert draft["case_stage"] == "拘留"
     assert draft["facts"] == req.entities
     assert draft["risk_analysis"]
     assert draft["recommended_lawyers"] == [{"id": "lawyer-1"}]
     assert draft["contact"] == {"name": "张三", "phone": "13800138000"}
+    assert draft["consent"] is True
+    assert draft["city"] == "上海"
+    assert draft["preferred_time"] == "2026-09-01 10:00"
+    assert draft["source"] == "law_agent"
+    assert draft["version"] == 1
+    assert isinstance(draft["created_at"], str)
+    assert isinstance(draft["updated_at"], str)
     assert draft["status"] == "PENDING"
     assert set(draft) == {
         "request_id",
@@ -299,6 +322,14 @@ def test_create_consultation_record_draft_contract():
         "risk_analysis",
         "recommended_lawyers",
         "contact",
+        "consent",
+        "city",
+        "preferred_time",
+        "case_stage",
+        "source",
+        "created_at",
+        "updated_at",
+        "version",
         "status",
     }
 
@@ -347,3 +378,94 @@ def test_tool_collection_names_are_stable():
         "create_consultation_record",
         "build_handoff_summary",
     }
+
+
+def test_consultation_draft_status_requires_contact_and_consent():
+    req = make_request(intent=LawIntent.DANGEROUS_DRIVING)
+    valid_contact = {"contact": {"name": "张三", "phone": "13800138000"}}
+
+    no_consent = create_consultation_record(req, {**valid_contact, "consent": False})
+    assert no_consent["status"] == "DRAFT"
+
+    invalid_contact = create_consultation_record(req, {"consent": True})
+    assert invalid_contact["status"] == "DRAFT"
+
+    pending = create_consultation_record(req, {**valid_contact, "consent": True})
+    assert pending["status"] == "PENDING"
+
+
+def test_consultation_schema_accepts_new_fields_and_validates_array_object():
+    spec = escalation_tools()["create_consultation_record"]
+    props = spec.input_schema["properties"]
+
+    assert "consent" in props
+    assert "city" in props
+    assert "preferred_time" in props
+    assert props["recommended_lawyers"]["type"] == "array"
+    assert props["contact"]["type"] == "object"
+
+    BaseAgent._validate_tool_input(
+        spec,
+        {
+            "recommended_lawyers": [{"id": "lawyer-1"}],
+            "contact": {"name": "张三", "phone": "13800138000"},
+            "consent": True,
+            "city": "上海",
+            "preferred_time": "2026-09-01 10:00",
+        },
+    )
+
+    with pytest.raises(ValueError, match="array"):
+        BaseAgent._validate_tool_input(spec, {"recommended_lawyers": "not-a-list"})
+    with pytest.raises(ValueError, match="object"):
+        BaseAgent._validate_tool_input(spec, {"contact": []})
+
+
+def test_recommend_lawyer_uses_legal_domain_override():
+    class RecordingService:
+        def __init__(self):
+            self.seen = None
+
+        def recommend(self, domain):
+            self.seen = domain
+            return [{"domain": domain}]
+
+    service = RecordingService()
+    req = make_request(intent=LawIntent.CRIMINAL_DEFENSE)
+
+    result = recommend_lawyer(req, {"legal_domain": "civil"}, service)
+
+    assert service.seen == "civil"
+    assert result == [{"domain": "civil"}]
+
+
+def test_pii_is_redacted_in_tool_inputs():
+    payload = {
+        "name": "张三",
+        "phone": "13800138000",
+        "contact_name": "李四",
+        "contact_phone": "13900139000",
+        "contact": {
+            "name": "王五",
+            "phone": "13700137000",
+        },
+        "city": "上海",
+    }
+
+    redacted = BaseAgent._redact_pii(payload)
+
+    assert redacted["name"] == "***"
+    assert redacted["phone"] == "***"
+    assert redacted["contact_name"] == "***"
+    assert redacted["contact_phone"] == "***"
+    assert redacted["contact"] == {"name": "***", "phone": "***"}
+    assert redacted["city"] == "上海"
+    assert payload["phone"] == "13800138000"
+
+
+def test_contract_intents_are_plain_strings():
+    req = make_request(intent=LawIntent.CRIMINAL_DEFENSE)
+    assert type(identify_legal_domain(req, {})["intent"]) is str
+    assert type(build_reception_summary(req, {})["intent"]) is str
+    assert type(build_handoff_summary(req, {})["intent"]) is str
+    assert type(create_consultation_record(req, {})["legal_domain"]) is str

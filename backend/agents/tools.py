@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING, Union
 
 from core.law_domain import LawIntent, LAW_INTENT_GROUPS
@@ -76,8 +77,11 @@ def _intent_value(req: Request) -> str:
     return "unknown"
 
 
-def _risk_flags(req: Request) -> List[Any]:
-    return list(req.risk_flags or [])
+def _risk_flags(req: Request) -> List[str]:
+    return [
+        getattr(flag, "value", str(flag))
+        for flag in (req.risk_flags or [])
+    ]
 
 
 def _urgency_name(req: Request) -> str:
@@ -87,7 +91,7 @@ def _urgency_name(req: Request) -> str:
 
 
 def _first_entity(req: Request, key: str, default: Any = "unknown") -> Any:
-    raw = req.entities.get(key)
+    raw = (getattr(req, "entities", None) or {}).get(key)
     if not raw:
         return default
     if isinstance(raw, list):
@@ -104,12 +108,14 @@ def _domain_name(req: Request) -> str:
     return "other"
 
 
-def _legal_domain_value(req: Request) -> Any:
+def _legal_domain_value(req: Request) -> str:
     """优先使用实体抽取的 legal_domain，其次使用已识别意图。"""
     entity_value = req.entities.get("legal_domain")
     if entity_value:
-        return _first_entity(req, "legal_domain", req.intent)
-    return req.intent if req.intent is not None else "unknown"
+        return str(_first_entity(req, "legal_domain", req.intent))
+    if req.intent is not None:
+        return req.intent.value
+    return "unknown"
 
 
 def _required_fields_for(req: Request) -> List[str]:
@@ -243,7 +249,7 @@ def build_shared_law_rag_tools(tool_manager: Optional[Any]) -> Dict[str, AgentTo
 def identify_legal_domain(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     """识别当前咨询的法律领域并返回风险信号。"""
     return {
-        "intent": req.intent if req.intent is not None else "unknown",
+        "intent": _intent_value(req),
         "legal_domain": _legal_domain_value(req),
         "domain": _domain_name(req),
         "risk_flags": _risk_flags(req),
@@ -277,7 +283,7 @@ def build_reception_summary(req: Request, args: Dict[str, Any]) -> Dict[str, Any
     )
     return {
         "request_id": req.request_id,
-        "intent": req.intent if req.intent is not None else "unknown",
+        "intent": _intent_value(req),
         "legal_domain": _legal_domain_value(req),
         "risk_flags": _risk_flags(req),
         "facts": dict(req.entities or {}),
@@ -376,12 +382,23 @@ def extract_civil_facts(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
 
 def determine_procedure(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     """根据民事意图判断最可能的法律程序。"""
-    intent = req.intent if req.intent is not None else args.get("intent", "unknown")
-    procedure = CIVIL_PROCEDURES.get(intent)
+    intent_key = req.intent if req.intent is not None else args.get("intent", "unknown")
+    intent_value = (
+        req.intent.value
+        if req.intent is not None
+        else str(args.get("intent", "unknown"))
+    )
+    if isinstance(intent_key, str):
+        try:
+            procedure = CIVIL_PROCEDURES.get(LawIntent(intent_key))
+        except ValueError:
+            procedure = None
+    else:
+        procedure = CIVIL_PROCEDURES.get(intent_key)
     if procedure is None:
         procedure = str(args.get("procedure", "待确认"))
     return {
-        "intent": intent,
+        "intent": intent_value,
         "procedure": procedure,
         "need_confirm": procedure == "待确认",
         "legal_domain": _legal_domain_value(req),
@@ -434,7 +451,12 @@ def recommend_lawyer(
             "reason": "lawyer_service_not_configured",
             "lawyers": [],
         }
-    intent = req.intent if req.intent is not None else args.get("intent")
+    domain = args.get("legal_domain")
+    intent = (
+        domain
+        if domain not in (None, "")
+        else (req.intent if req.intent is not None else args.get("intent"))
+    )
     return lawyer_service.recommend(intent)
 
 
@@ -460,8 +482,56 @@ def _contact_from_args(args: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _merge_request_contact(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge contact fields carried by Request into tool args."""
+    merged = dict(args)
+    source = getattr(req, "contact", None)
+    if isinstance(source, dict):
+        for dest, src_key in (
+            ("name", "name"),
+            ("name", "contact_name"),
+            ("phone", "phone"),
+            ("phone", "contact_phone"),
+        ):
+            if not merged.get(dest) and source.get(src_key):
+                merged[dest] = source[src_key]
+        if "consent" not in merged and "consent" in source:
+            merged["consent"] = source.get("consent")
+        if not merged.get("city") and source.get("city"):
+            merged["city"] = source.get("city")
+        if not merged.get("preferred_time") and source.get("preferred_time"):
+            merged["preferred_time"] = source.get("preferred_time")
+        if not merged.get("case_stage") and source.get("case_stage"):
+            merged["case_stage"] = source.get("case_stage")
+    entities = getattr(req, "entities", None) or {}
+    for key in ("name", "phone", "contact_name", "contact_phone", "city", "preferred_time", "consent", "case_stage"):
+        if key == "consent":
+            if key not in merged:
+                value = getattr(req, key, None)
+                if value not in (None, ""):
+                    merged[key] = value
+                else:
+                    entity_values = entities.get(key)
+                    if entity_values:
+                        first = entity_values[0] if isinstance(entity_values, (list, tuple)) else entity_values
+                        if first not in (None, ""):
+                            merged[key] = first
+        elif not merged.get(key):
+            value = getattr(req, key, None)
+            if value not in (None, ""):
+                merged[key] = value
+            else:
+                entity_values = entities.get(key)
+                if entity_values:
+                    first = entity_values[0] if isinstance(entity_values, (list, tuple)) else entity_values
+                    if first not in (None, ""):
+                        merged[key] = first
+    return merged
+
+
 def validate_contact(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     """校验留资姓名与 11 位中国手机号码，返回结构化结果。"""
+    args = _merge_request_contact(req, args)
     name = _contact_from_args(args)["name"]
     phone = _contact_from_args(args)["phone"]
     errors: List[str] = []
@@ -480,13 +550,25 @@ def validate_contact(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _as_bool(value: Any) -> bool:
+    """Convert boolean-like tool input to a real bool."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "是"}
+    return bool(value)
+
+
 def create_consultation_record(
     req: Request,
     args: Dict[str, Any],
     lawyer_service: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """生成咨询记录草稿；数据库持久化由后续 Task 8/9 完成。"""
-    recommended_lawyers = list(args.get("recommended_lawyers") or [])
+    raw_lawyers = args.get("recommended_lawyers") or []
+    recommended_lawyers = (
+        list(raw_lawyers)
+        if isinstance(raw_lawyers, (list, tuple))
+        else []
+    )
     if not recommended_lawyers and lawyer_service is not None:
         result = recommend_lawyer(req, args, lawyer_service)
         if isinstance(result, list):
@@ -494,16 +576,31 @@ def create_consultation_record(
         elif isinstance(result, dict):
             recommended_lawyers = list(result.get("lawyers") or [])
 
-    contact = _contact_from_args(args)
+    effective_args = _merge_request_contact(req, dict(args))
+
+    contact = _contact_from_args(effective_args)
+    contact_valid = validate_contact(req, effective_args)["valid"]
+    consent = _as_bool(effective_args.get("consent", False))
     if not contact.get("name") and not contact.get("phone"):
         contact = {}
     risk_flags = _risk_flags(req)
-    risk_text = ", ".join(
-        getattr(flag, "value", str(flag)) for flag in risk_flags
-    ) or "暂无"
+    risk_text = ", ".join(risk_flags) or "暂无"
     risk_analysis = (
         f"风险等级：{_urgency_name(req)}；风险信号：{risk_text}；"
         "当前为初步分析，需律师或人工进一步核验。"
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    case_stage_arg = effective_args.get("case_stage")
+    case_stage = str(
+        case_stage_arg
+        if case_stage_arg not in (None, "")
+        else _first_entity(req, "case_stage", "unknown")
+    )
+    city = str(effective_args.get("city") or _first_entity(req, "city", "") or "")
+    preferred_time = str(
+        effective_args.get("preferred_time")
+        or _first_entity(req, "preferred_time", "")
+        or ""
     )
     return {
         "request_id": req.request_id,
@@ -514,12 +611,21 @@ def create_consultation_record(
         "risk_analysis": risk_analysis,
         "recommended_lawyers": recommended_lawyers,
         "contact": contact,
-        "status": "PENDING",
+        "consent": consent,
+        "city": city,
+        "preferred_time": preferred_time,
+        "case_stage": case_stage,
+        "source": "law_agent",
+        "created_at": now,
+        "updated_at": now,
+        "version": 1,
+        "status": "PENDING" if contact_valid and consent else "DRAFT",
     }
 
 
 def build_handoff_summary(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     """生成交给人工客服/律师的结构化交接摘要。"""
+    args = _merge_request_contact(req, args)
     contact = _contact_from_args(args)
     contact_filled = bool(contact.get("name") and contact.get("phone"))
     risk_text = ", ".join(
@@ -531,7 +637,7 @@ def build_handoff_summary(req: Request, args: Dict[str, Any]) -> Dict[str, Any]:
     )
     return {
         "request_id": req.request_id,
-        "intent": req.intent if req.intent is not None else "unknown",
+        "intent": _intent_value(req),
         "risk_flags": _risk_flags(req),
         "contact_filled": contact_filled,
         "summary": summary,
@@ -570,10 +676,21 @@ def escalation_tools(lawyer_service: Optional[Any] = None) -> Dict[str, AgentToo
         ),
         "create_consultation_record": make_tool(
             "create_consultation_record",
-            "生成咨询记录草稿，状态为 PENDING；不直接写数据库。",
+            "生成咨询记录草稿；未满足留资条件时状态为 DRAFT，不直接写数据库。",
             {
-                "recommended_lawyers": {"type": "array", "description": "推荐律师列表"},
+                "recommended_lawyers": {
+                    "type": "array",
+                    "description": "推荐律师列表",
+                    "items": {"type": "object"},
+                },
                 "contact": {"type": "object", "description": "姓名与手机号"},
+                "name": {"type": "string", "description": "联系人姓名"},
+                "phone": {"type": "string", "description": "11 位中国手机号码"},
+                "consent": {"type": "boolean", "description": "是否同意律所联系"},
+                "city": {"type": "string", "description": "所在城市"},
+                "preferred_time": {"type": "string", "description": "期望联系时间"},
+                "case_stage": {"type": "string", "description": "案件阶段"},
+                "legal_domain": {"type": "string", "description": "法律领域覆盖"},
             },
             create_handler,
         ),
@@ -582,6 +699,8 @@ def escalation_tools(lawyer_service: Optional[Any] = None) -> Dict[str, AgentToo
             "生成转人工/律师交接摘要。",
             {
                 "contact": {"type": "object", "description": "可选联系方式"},
+                "name": {"type": "string", "description": "联系人姓名"},
+                "phone": {"type": "string", "description": "11 位中国手机号码"},
             },
             build_handoff_summary,
         ),

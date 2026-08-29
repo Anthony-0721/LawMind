@@ -6,6 +6,7 @@ availability is not asserted here.
 """
 import asyncio
 import ast
+import json
 from pathlib import Path
 
 from agents.agent_orchestrator import (
@@ -14,6 +15,7 @@ from agents.agent_orchestrator import (
     CivilConsultationAgent,
     CriminalDefenseAgent,
     EscalationAgent,
+    OrchestratorResult,
     ReceptionAgent,
     Request,
 )
@@ -43,6 +45,32 @@ class FakeClient:
         raise AssertionError("EscalationAgent must not call the LLM")
 
 
+class FakeToolClient:
+    """Fake client that triggers one failed RAG search, then returns text."""
+
+    def __init__(self):
+        self.calls = 0
+
+    @property
+    def messages(self):
+        return self
+
+    async def create(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            from types import SimpleNamespace
+            return SimpleNamespace(content=[
+                {
+                    "type": "tool_use",
+                    "id": "tool-1",
+                    "name": "search_law_knowledge",
+                    "input": {"query": "醉驾"},
+                }
+            ])
+        from types import SimpleNamespace
+        return SimpleNamespace(content=[{"type": "text", "text": "完成"}])
+
+
 def make_request(
     message: str,
     intent: LawIntent = LawIntent.OTHER,
@@ -50,6 +78,11 @@ def make_request(
     urgency: UrgencyLevel = UrgencyLevel.MEDIUM,
     risk_flags=None,
     confidence: float = 0.9,
+    contact_name: str = "",
+    contact_phone: str = "",
+    city: str = "",
+    preferred_time: str = "",
+    consent: bool = False,
 ) -> Request:
     return Request(
         message=message,
@@ -60,6 +93,11 @@ def make_request(
         urgency=urgency,
         intent_confidence=confidence,
         risk_flags=list(risk_flags or []),
+        contact_name=contact_name,
+        contact_phone=contact_phone,
+        city=city,
+        preferred_time=preferred_time,
+        consent=consent,
     )
 
 
@@ -281,3 +319,106 @@ def test_low_confidence_other_with_detention_bypasses_clarification_and_escalate
 
     assert result.primary_agent == AgentType.ESCALATION
     assert result.escalated is True
+
+
+def test_escalation_handle_calls_tools_and_creates_record_when_complete():
+    client = FakeClient()
+    agent = EscalationAgent(client, "test-model")
+    req = make_request(
+        "我愿意留资并预约律师",
+        intent=LawIntent.LAWYER_APPOINTMENT,
+        contact_name="张三",
+        contact_phone="13800138000",
+        city="上海",
+        preferred_time="2026-09-01 10:00",
+        consent=True,
+    )
+
+    result = asyncio.run(agent.handle(req))
+
+    assert result.tools_used == [
+        "recommend_lawyer",
+        "build_handoff_summary",
+        "create_consultation_record",
+    ]
+    assert [trace["tool_name"] for trace in result.tool_traces] == result.tools_used
+    assert client.called is False
+    for trace in result.tool_traces:
+        assert "13800138000" not in json.dumps(trace, ensure_ascii=False)
+        assert "张三" not in json.dumps(trace, ensure_ascii=False)
+
+
+def test_escalation_does_not_create_record_without_complete_contact_and_consent():
+    client = FakeClient()
+    agent = EscalationAgent(client, "test-model")
+    req = make_request("帮我预约律师", intent=LawIntent.LAWYER_APPOINTMENT)
+
+    result = asyncio.run(agent.handle(req))
+
+    assert result.tools_used == ["recommend_lawyer", "build_handoff_summary"]
+    assert "create_consultation_record" not in [trace["tool_name"] for trace in result.tool_traces]
+    assert client.called is False
+
+
+def test_failed_rag_search_is_not_counted_as_tool_used():
+    agent = CriminalDefenseAgent(FakeToolClient(), "test-model")
+
+    content = asyncio.run(agent._call_llm(make_request("醉驾咨询")))
+
+    assert content == "完成"
+    assert agent._last_tools_used == []
+    assert len(agent._last_tool_traces) == 1
+    assert agent._last_tool_traces[0]["tool_name"] == "search_law_knowledge"
+    assert agent._last_tool_traces[0]["result_success"] is False
+
+
+def test_api_knowledge_used_requires_successful_rag_trace():
+    from api.main import _knowledge_used
+
+    failed = OrchestratorResult(
+        request_id="req-1",
+        response="resp",
+        agent_type=AgentType.RECEPTION,
+        intent=LawIntent.OTHER,
+        tool_traces=[
+            {
+                "tool_name": "search_law_knowledge",
+                "success": True,
+                "result_success": False,
+            }
+        ],
+    )
+    success = OrchestratorResult(
+        request_id="req-2",
+        response="resp",
+        agent_type=AgentType.RECEPTION,
+        intent=LawIntent.OTHER,
+        tool_traces=[
+            {
+                "tool_name": "search_law_knowledge",
+                "success": True,
+                "result_success": True,
+            }
+        ],
+    )
+
+    assert _knowledge_used(failed) is False
+    assert _knowledge_used(success) is True
+
+
+def test_agent_orchestrator_injects_lawyer_service_into_escalation_agent():
+    class FakeLawyerService:
+        def recommend(self, intent):
+            return [{"id": "lawyer-1"}]
+
+    service = FakeLawyerService()
+    orchestrator = AgentOrchestrator(
+        api_key="test-key",
+        model="test-model",
+        client=FakeClient(),
+        lawyer_service=service,
+    )
+
+    agent = orchestrator._best_agent(AgentType.ESCALATION)
+    assert agent is not None
+    assert agent._lawyer_service is service
