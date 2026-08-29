@@ -23,6 +23,19 @@ from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
 
+from core.law_domain import (
+    LAW_INTENT_GROUPS,
+    LAW_PATTERNS,
+    LAW_PATTERN_PRIORITY,
+    LAW_RISK_RULES,
+    LAW_TEMPLATES,
+    LawEntityExtractor,
+    LawIntent,
+    LawIntentResult,
+    LawRiskFlag,
+    detect_law_risk_flags,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -505,3 +518,113 @@ class IntentRecognizer:
             "misses": self.cache_misses,
             "hit_rate": self.cache_hits / total if total else 0.0,
         }
+
+
+# ── Law-specific intent recognizer ───────────────────────────────────────────
+class LawIntentRecognizer:
+    """Offline, deterministic recognizer for the law-firm consultation domain.
+
+    This class intentionally does not call an external LLM: Task 2 only needs
+    local templates, risk rules and entity extraction. ``api_key`` and ``model``
+    are accepted so the call site can be migrated from the old recognizer
+    without changing constructor usage.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "test-model",
+        base_url: Optional[str] = None,
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url
+        self.entity_extractor = LawEntityExtractor()
+        self.confidence_threshold = 0.5
+
+    async def recognize(
+        self,
+        message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> LawIntentResult:
+        """Async-compatible entry point for later agent/API wiring."""
+        # History is intentionally accepted for API compatibility; the local
+        # recognizer does not need dialogue context in this task.
+        return self.recognize_sync(message)
+
+    def recognize_sync(self, message: str) -> LawIntentResult:
+        """Recognize a law-domain intent and risk signals synchronously."""
+        started = time.monotonic()
+        text = self._clean_text(message)
+
+        intent, confidence, source_scores = self._match_intent(text)
+        risk_flags = detect_law_risk_flags(text)
+        entities = self.entity_extractor.extract(text, intent=intent)
+        entities["risk_flags"] = [flag.value for flag in risk_flags]
+
+        result = LawIntentResult(
+            intent=intent,
+            intent_group=LAW_INTENT_GROUPS.get(intent, "other"),
+            urgency=self._urgency(text, risk_flags),
+            risk_flags=risk_flags,
+            entities=entities,
+            confidence=confidence,
+            source_scores=source_scores,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+        )
+        return result
+
+    def _match_intent(
+        self,
+        message: str,
+    ) -> tuple[LawIntent, float, Dict[str, float]]:
+        """Match local templates/patterns and return a deterministic result."""
+        scores: Dict[LawIntent, float] = {}
+
+        for intent in LAW_PATTERN_PRIORITY:
+            if intent is LawIntent.OTHER:
+                continue
+            pattern_hits = [item for item in LAW_PATTERNS[intent] if item in message]
+            template_hits = [item for item in LAW_TEMPLATES[intent] if item in message]
+            if pattern_hits or template_hits:
+                hit_count = len(pattern_hits) + len(template_hits)
+                scores[intent] = 0.6 + min(0.35, 0.1 * (hit_count - 1))
+
+        if not scores:
+            return (
+                LawIntent.OTHER,
+                0.0,
+                {"pattern": 0.0, "llm": 0.0, "embedding": 0.0},
+            )
+
+        best_score = max(scores.values())
+        candidates = [intent for intent, score in scores.items() if score == best_score]
+        best = min(candidates, key=lambda intent: LAW_PATTERN_PRIORITY.index(intent))
+        return best, best_score, {"pattern": best_score, "llm": 0.0, "embedding": 0.0}
+
+    @staticmethod
+    def _urgency(message: str, risk_flags: List[LawRiskFlag]) -> str:
+        if "紧急" in message or "非常着急" in message:
+            return "CRITICAL"
+        if LawRiskFlag.DETENTION in risk_flags:
+            return "HIGH"
+        if LawRiskFlag.COURT_SOON in risk_flags:
+            return "HIGH"
+        if any(
+            flag in risk_flags
+            for flag in (
+                LawRiskFlag.INJURY,
+                LawRiskFlag.TRAFFIC_ACCIDENT,
+                LawRiskFlag.FILED,
+                LawRiskFlag.PROSECUTION,
+            )
+        ):
+            return "HIGH"
+        return "MEDIUM"
+
+    @staticmethod
+    def _clean_text(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value)
+        return text.encode("utf-8", errors="ignore").decode("utf-8")
