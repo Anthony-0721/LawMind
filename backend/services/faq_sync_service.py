@@ -8,19 +8,22 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Optional
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _ID_CARD_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 _PHONE_RE = re.compile(
     r"(?<!\d)(?:\+86[\s\-]*1[3-9](?:[\s\-]*\d){9}|1[3-9](?:[\s\-]*\d){9})(?!\d)"
 )
-_MASKED_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{2}\*{2,4}\d{4}(?!\d)")
+_MASKED_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{1}\*{2,4}\d{4}(?!\d)")
 _LANDLINE_PHONE_RE = re.compile(
     r"(?<!\d)0\d{2,3}[\s\-]?\d{7,8}(?:\s*[-—]?\s*\d{1,6})?(?!\d)"
 )
 _NAME_AFTER_INDICATOR_RE = re.compile(
     r"((?:姓名|客户|联系人)(?:\s*[:：])?|(?:失败|错误)\s*[:：])(\s*)([\u4e00-\u9fff]{2,4})(?=\s|[,，。:：]|$)"
+)
+_NAME_BEFORE_PLACEHOLDER_RE = re.compile(
+    r"[\u4e00-\u9fff]{2,4}(?=[\s]*<(?:phone|email|id)>)"
 )
 
 
@@ -40,12 +43,37 @@ def _record_id(record: Any) -> str:
     return str(_record_value(record, "id", "") or "").strip()
 
 
+class _FaqValidationError(ValueError):
+    """Validation failure with a cleanup policy for stale Chroma vectors."""
+
+    def __init__(self, message: str, *, cleanup: bool = True):
+        super().__init__(message)
+        self.cleanup = cleanup
+
+
 def _record_version(record: Any) -> int:
+    """Return a strictly valid positive version or raise ValidationError."""
+    raw = _record_value(record, "version", None)
+    if raw is None:
+        raise _FaqValidationError("faq record version is required", cleanup=False)
     try:
-        value = int(_record_value(record, "version", 1) or 1)
-    except (TypeError, ValueError):
-        return 1
-    return value if value >= 1 else 1
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise _FaqValidationError(
+            "faq version must be an integer", cleanup=False
+        ) from exc
+    if value <= 0:
+        raise _FaqValidationError(
+            "faq version must be a positive integer", cleanup=False
+        )
+    return value
+
+
+def _record_version_safe(record: Any) -> int:
+    try:
+        return _record_version(record)
+    except _FaqValidationError:
+        return 0
 
 
 def _utcnow_text() -> str:
@@ -75,11 +103,11 @@ def _normalize_faq(record: Any) -> Dict[str, Any]:
     question = str(_record_value(record, "question", "") or "").strip()
     answer = str(_record_value(record, "answer", "") or "").strip()
     if not faq_id:
-        raise ValueError("faq record id is required")
+        raise _FaqValidationError("faq record id is required")
     if not question:
-        raise ValueError("faq question is required")
+        raise _FaqValidationError("faq question is required")
     if not answer:
-        raise ValueError("faq answer is required")
+        raise _FaqValidationError("faq answer is required")
 
     keywords = _as_list(_record_value(record, "keywords", []))
     version = _record_version(record)
@@ -94,7 +122,7 @@ def _normalize_faq(record: Any) -> Dict[str, Any]:
     }
 
 
-def _sanitize_error(error: Exception, faq: Mapping[str, Any]) -> str:
+def _sanitize_error(error: Exception, faq: Optional[Mapping[str, Any]]) -> str:
     """Strip FAQ content, contact details, and other PII from exception text."""
     faq = faq or {}
     raw = str(error).strip() or error.__class__.__name__
@@ -112,6 +140,7 @@ def _sanitize_error(error: Exception, faq: Mapping[str, Any]) -> str:
     raw = _LANDLINE_PHONE_RE.sub("<phone>", raw)
     raw = _EMAIL_RE.sub("<email>", raw)
     raw = _ID_CARD_RE.sub("<id>", raw)
+    raw = _NAME_BEFORE_PLACEHOLDER_RE.sub("**", raw)
     raw = _NAME_AFTER_INDICATOR_RE.sub(r"\1\2<name>", raw)
     sanitized = re.sub(r"\s+", " ", raw).strip()[:500]
     return sanitized or "faq sync failed"
@@ -180,6 +209,10 @@ class FaqSyncService:
             return {"success": False, "error": "faq_sync_delete_failed"}
         return {"success": True, "faq_id": normalized_id, "action": "delete"}
 
+    def sync_delete(self, faq_id: Any) -> Dict[str, Any]:
+        """Alias for delete used by the production CRUD flow."""
+        return self.delete(faq_id)
+
     def _failure_result(
         self,
         faq_record: Any,
@@ -188,19 +221,21 @@ class FaqSyncService:
         error: str,
         *,
         added: bool = False,
+        cleanup: bool = True,
+        persist_failure: bool = True,
     ) -> Dict[str, Any]:
-        """Clean stale vectors, persist the failure, and update mutable input."""
-        if faq_id:
+        """Optionally clean vectors, persist failure, and update mutable input."""
+        if faq_id and cleanup:
             try:
                 self.knowledge_base.delete_by_metadata({"faq_id": faq_id})
             except Exception:
                 pass
         failed_state = None
-        try:
-            if faq_id:
+        if persist_failure and faq_id:
+            try:
                 failed_state = self.faq_repository.mark_sync_failed(faq_id, error)
-        except Exception:
-            pass
+            except Exception:
+                pass
         if isinstance(failed_state, Mapping):
             failed_updates = {
                 "sync_status": failed_state.get("sync_status", "failed"),
@@ -226,15 +261,57 @@ class FaqSyncService:
             "added": added,
         }
 
+    def _preflight(self, faq: Mapping[str, Any]) -> tuple[bool, Optional[str]]:
+        """Check the authoritative DB version before mutating Chroma."""
+        getter = getattr(self.faq_repository, "get_by_id", None)
+        if getter is None:
+            return True, None
+        try:
+            current = getter(faq["id"])
+        except Exception as exc:
+            return False, _sanitize_error(exc, faq)
+        if not isinstance(current, Mapping):
+            return False, "faq_sync_record_not_found"
+        try:
+            current_version = _record_version(current)
+        except _FaqValidationError:
+            return False, "faq_sync_record_version_invalid"
+        if current_version != faq["version"]:
+            return False, "faq_sync_version_mismatch"
+        return True, None
+
     def sync(self, faq_record: Any) -> Dict[str, Any]:
-        """Delete the old vector, add the active FAQ, and update sync state."""
+        """Preflight version, then delete/add the FAQ and update sync state."""
         try:
             faq = _normalize_faq(faq_record)
+        except _FaqValidationError as exc:
+            faq_id = _record_id(faq_record)
+            version = _record_version_safe(faq_record)
+            error = _sanitize_error(exc, {"id": faq_id})
+            return self._failure_result(
+                faq_record,
+                faq_id,
+                version,
+                error,
+                cleanup=exc.cleanup,
+                persist_failure=exc.cleanup,
+            )
         except Exception as exc:
             faq_id = _record_id(faq_record)
-            version = _record_version(faq_record)
+            version = _record_version_safe(faq_record)
             error = _sanitize_error(exc, {"id": faq_id})
             return self._failure_result(faq_record, faq_id, version, error)
+
+        preflight_ok, preflight_error = self._preflight(faq)
+        if not preflight_ok:
+            return self._failure_result(
+                faq_record,
+                faq["id"],
+                faq["version"],
+                preflight_error or "faq_sync_preflight_failed",
+                cleanup=False,
+                persist_failure=False,
+            )
 
         faq_id = faq["id"]
         version = faq["version"]
@@ -310,6 +387,52 @@ class FaqSyncService:
             "added": added,
         }
 
+    def create_record(self, payload: Any) -> Dict[str, Any]:
+        """Create a FAQ through the repository and synchronize it."""
+        try:
+            record = self.faq_repository.create(payload)
+        except Exception as exc:
+            error = _sanitize_error(exc, payload if isinstance(payload, Mapping) else {})
+            return {"success": False, "error": error}
+        if not isinstance(record, Mapping):
+            return {"success": False, "error": "faq_create_failed"}
+        return self.sync(record)
+
+    def update_record(self, faq_id: Any, payload: Any) -> Dict[str, Any]:
+        """Update a FAQ through the repository and synchronize it."""
+        try:
+            record = self.faq_repository.update(str(faq_id), payload)
+        except Exception as exc:
+            error = _sanitize_error(exc, payload if isinstance(payload, Mapping) else {})
+            return {"success": False, "error": error}
+        if not isinstance(record, Mapping):
+            return {"success": False, "faq_id": str(faq_id), "error": "faq_update_failed"}
+        return self.sync(record)
+
+    def toggle_record(self, faq_id: Any, active: Optional[bool] = None) -> Dict[str, Any]:
+        """Toggle a FAQ; inactive records only remove retrieval vectors."""
+        try:
+            record = self.faq_repository.toggle(str(faq_id), active)
+        except Exception as exc:
+            error = _sanitize_error(exc, {"id": str(faq_id)})
+            return {"success": False, "error": error}
+        if not isinstance(record, Mapping):
+            return {"success": False, "faq_id": str(faq_id), "error": "faq_toggle_failed"}
+        if not bool(record.get("active", False)):
+            return self.sync_delete(str(record.get("id") or faq_id))
+        return self.sync(record)
+
+    def delete_record(self, faq_id: Any) -> Dict[str, Any]:
+        """Delete the DB record first, then remove every retrieval vector."""
+        normalized_id = str(faq_id or "").strip()
+        try:
+            deleted = self.faq_repository.delete(normalized_id)
+        except Exception:
+            return {"success": False, "faq_id": normalized_id, "error": "faq_delete_failed"}
+        if deleted is False:
+            return {"success": False, "faq_id": normalized_id, "error": "faq_delete_failed"}
+        return self.sync_delete(normalized_id)
+
     def _inactive_failure(self, faq_record: Any, faq_id: str, version: int) -> Dict[str, Any]:
         """Inactive records remove stale vectors but are reported as not added."""
         error = "faq_inactive"
@@ -351,7 +474,7 @@ class FaqSyncService:
                 results.append(self.sync(record))
             except Exception as exc:
                 faq_id = _record_id(record)
-                version = _record_version(record)
+                version = _record_version_safe(record)
                 error = _sanitize_error(exc, {"id": faq_id})
                 results.append(
                     self._failure_result(record, faq_id, version, error)

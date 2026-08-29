@@ -148,6 +148,18 @@ async def lifespan(app: FastAPI):
     )
     logger.info(f"知识库已加载: {await kb.doc_count_async()} 个文档片段")
 
+    from db.database import SessionLocal
+    from services.bootstrap import bootstrap_law_data
+
+    data_root = pathlib.Path(_ROOT) / "data"
+    bootstrap_summary = bootstrap_law_data(
+        SessionLocal,
+        kb,
+        data_root / "law_faq_seed.json",
+        data_root / "lawyers_seed.json",
+    )
+    logger.info("律所数据初始化完成: %s", bootstrap_summary)
+
     def knowledge_fallback(params: Dict[str, Any], context: Optional[Dict[str, Any]], error: str):
         query = params.get("query", "")
         return [{

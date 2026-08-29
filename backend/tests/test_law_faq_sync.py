@@ -9,6 +9,15 @@ import sys
 import types
 from typing import Any, Dict, List, Optional
 
+from pathlib import Path
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from db.models import Base
+import services.bootstrap as bootstrap_module
+
 # Keep the test import offline: the real chromadb package is not required for
 # unit tests, and the KnowledgeBase class only touches it during instantiation.
 if "chromadb" not in sys.modules:
@@ -112,6 +121,10 @@ class FakeFaqRepository:
         self.list_all_calls: List[bool] = []
         self.marked_synced: List[tuple[str, int]] = []
         self.marked_failed: List[tuple[str, str]] = []
+        self.create_calls: List[Any] = []
+        self.update_calls: List[tuple[str, Any]] = []
+        self.toggle_calls: List[tuple[str, Optional[bool]]] = []
+        self.delete_calls: List[str] = []
         self.fail_mark_synced = fail_mark_synced
 
     def _find(self, faq_id: str) -> Optional[Dict[str, Any]]:
@@ -120,11 +133,63 @@ class FakeFaqRepository:
                 return item
         return None
 
+    def get_by_id(self, faq_id: str) -> Optional[Dict[str, Any]]:
+        record = self._find(str(faq_id))
+        return dict(record) if record is not None else None
+
     def list_all(self, active_only: bool = False) -> List[Dict[str, Any]]:
         self.list_all_calls.append(active_only)
         if active_only:
             return [item for item in self.records if item["active"]]
         return list(self.records)
+
+    def create(self, payload: Any) -> Dict[str, Any]:
+        self.create_calls.append(payload)
+        data = dict(payload or {})
+        data.setdefault("id", f"faq-{len(self.records) + 1}")
+        data.setdefault("category", "")
+        data.setdefault("question", "")
+        data.setdefault("answer", "")
+        data.setdefault("keywords", [])
+        data.setdefault("source", "law_firm")
+        data.setdefault("active", True)
+        data.setdefault("version", 1)
+        data.setdefault("sync_status", "pending")
+        data.setdefault("sync_error", None)
+        data.setdefault("last_sync_at", None)
+        record = dict(data)
+        self.records.append(record)
+        return dict(record)
+
+    def update(self, faq_id: str, payload: Any) -> Optional[Dict[str, Any]]:
+        self.update_calls.append((faq_id, payload))
+        record = self._find(str(faq_id))
+        if record is None:
+            return None
+        record.update(dict(payload or {}))
+        record["version"] = int(record.get("version") or 1) + 1
+        record["sync_status"] = "pending"
+        record["sync_error"] = None
+        return dict(record)
+
+    def toggle(self, faq_id: str, active: Optional[bool] = None) -> Optional[Dict[str, Any]]:
+        self.toggle_calls.append((faq_id, active))
+        record = self._find(str(faq_id))
+        if record is None:
+            return None
+        record["active"] = not bool(record.get("active")) if active is None else bool(active)
+        record["version"] = int(record.get("version") or 1) + 1
+        record["sync_status"] = "pending"
+        record["sync_error"] = None
+        return dict(record)
+
+    def delete(self, faq_id: str) -> bool:
+        self.delete_calls.append(str(faq_id))
+        record = self._find(str(faq_id))
+        if record is None:
+            return False
+        self.records.remove(record)
+        return True
 
     def mark_synced(self, faq_id: str, version: int) -> Optional[Dict[str, Any]]:
         self.marked_synced.append((faq_id, version))
@@ -412,19 +477,163 @@ def test_sync_all_processes_active_and_inactive_records():
     assert repo.marked_failed == [("faq-inactive", "faq_inactive")]
 
 
-def test_stale_version_mark_synced_returns_failure():
+def test_stale_version_preserves_current_chroma_vector():
     faq = make_faq(version=1)
     repo = FakeFaqRepository([make_faq(version=2)])
     kb = FakeKnowledgeBase()
+    original = {
+        "content": "现有正确向量",
+        "metadata": {"faq_id": "faq-1", "version": 2},
+    }
+    kb.documents["faq:faq-1"] = original
     service = FaqSyncService(repo, kb)
 
     result = service.sync(faq)
 
     assert result["success"] is False
-    assert result["error"] == "faq_sync_mark_synced_failed"
+    assert result["error"] == "faq_sync_version_mismatch"
+    assert kb.documents == {"faq:faq-1": original}
+    assert kb.delete_calls == []
+    assert repo.marked_synced == []
+    assert repo.marked_failed == []
+
+
+def test_invalid_version_is_rejected_without_chroma_mutation():
+    invalid = make_faq(version=0)
+    repo = FakeFaqRepository([make_faq(version=1)])
+    kb = FakeKnowledgeBase()
+    original = {
+        "content": "现有向量",
+        "metadata": {"faq_id": "faq-1", "version": 1},
+    }
+    kb.documents["faq:faq-1"] = original
+    service = FaqSyncService(repo, kb)
+
+    result = service.sync(invalid)
+
+    assert result["success"] is False
+    assert result["error"] == "faq version must be a positive integer"
+    assert kb.documents == {"faq:faq-1": original}
+    assert kb.delete_calls == []
+    assert kb.add_calls == []
+    assert repo.marked_failed == []
+
+
+def test_pii_redacts_name_before_contact_and_masked_phone():
+    sanitized = _sanitize_error(
+        RuntimeError(
+            "张三13800138000 李四test@example.com 王五110101199001011234 "
+            "138****1234"
+        ),
+        {},
+    )
+
+    assert "**" in sanitized
+    assert "张三" not in sanitized
+    assert "李四" not in sanitized
+    assert "王五" not in sanitized
+    assert "138****1234" not in sanitized
+    assert "13800138000" not in sanitized
+
+
+def test_crud_service_methods_sync_create_update_toggle_delete():
+    repo = FakeFaqRepository()
+    kb = FakeKnowledgeBase()
+    service = FaqSyncService(repo, kb)
+
+    created = service.create_record({
+        "category": "criminal",
+        "question": "新增问题？",
+        "answer": "新增答案。",
+        "keywords": ["新增"],
+        "active": True,
+    })
+    assert created["success"] is True
+    assert created["added"] is True
+    faq_id = created["faq_id"]
+    assert repo.create_calls
+    assert f"faq:{faq_id}" in kb.documents
+
+    updated = service.update_record(faq_id, {
+        "question": "更新后的问题？",
+        "answer": "更新后的答案。",
+    })
+    assert updated["success"] is True
+    assert updated["version"] == 2
+    assert repo.update_calls == [(faq_id, {"question": "更新后的问题？", "answer": "更新后的答案。"})]
+    assert "更新后的问题？" in kb.documents[f"faq:{faq_id}"]["content"]
+
+    toggled_off = service.toggle_record(faq_id, False)
+    assert toggled_off == {"success": True, "faq_id": faq_id, "action": "delete"}
+    assert repo.toggle_calls == [(faq_id, False)]
     assert kb.documents == {}
-    assert repo.marked_synced == [("faq-1", 1)]
-    assert repo.marked_failed[-1][0] == "faq-1"
+
+    toggled_on = service.toggle_record(faq_id, True)
+    assert toggled_on["success"] is True
+    assert f"faq:{faq_id}" in kb.documents
+
+    deleted = service.delete_record(faq_id)
+    assert deleted == {"success": True, "faq_id": faq_id, "action": "delete"}
+    assert repo.delete_calls == [faq_id]
+    assert kb.documents == {}
+
+
+def test_bootstrap_seeds_and_syncs(monkeypatch):
+    faq_items = [{
+        "category": "criminal",
+        "question": "启动同步 FAQ",
+        "answer": "启动同步答案",
+        "keywords": ["启动"],
+        "active": True,
+    }]
+    lawyer_items = [{
+        "name": "启动律师",
+        "domain": "criminal",
+        "specialties": ["刑事"],
+        "active": True,
+    }]
+
+    def fake_load_seed(path: Any) -> List[Dict[str, Any]]:
+        return faq_items if "faq" in str(path).lower() else lawyer_items
+
+    monkeypatch.setattr(bootstrap_module, "_load_seed", fake_load_seed)
+    faq_path = Path("faq_seed.json")
+    lawyer_path = Path("lawyer_seed.json")
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    monkeypatch.setattr(bootstrap_module, "init_db", lambda: None)
+    kb = FakeKnowledgeBase()
+
+    summary = bootstrap_module.bootstrap_law_data(
+        Session,
+        kb,
+        faq_path,
+        lawyer_path,
+    )
+
+    assert summary["faq_seeded"] == 1
+    assert summary["lawyer_seeded"] == 1
+    assert summary["faq_synced"] == 1
+    assert summary["faq_failed"] == 0
+    assert len(kb.documents) == 1
+    assert next(iter(kb.documents)).startswith("faq:")
+
+    second = bootstrap_module.bootstrap_law_data(
+        Session,
+        kb,
+        faq_path,
+        lawyer_path,
+    )
+    assert second["faq_seeded"] == 0
+    assert second["lawyer_seeded"] == 0
+    assert second["faq_synced"] == 1
 
 
 def test_knowledge_base_add_documents_supports_stable_id_and_metadata():
