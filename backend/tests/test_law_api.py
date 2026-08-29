@@ -906,6 +906,7 @@ def test_admin_faq_crud_with_sqlite_and_request_scoped_sync(monkeypatch, session
 
 
 def test_admin_login_returns_authenticated(client, monkeypatch):
+    monkeypatch.delenv("LAWMIND_ADMIN_PASSWORD", raising=False)
     monkeypatch.setenv("LAW_FIRM_ADMIN_PASSWORD", "legacy-secret")
     response = client.post("/law/admin/login", json={"password": "legacy-secret"})
     assert response.status_code == 200
