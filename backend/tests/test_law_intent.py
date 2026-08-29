@@ -399,3 +399,30 @@ def test_fifth_review_extra_no_lawyer_double_negations(message):
     result = make_law_recognizer().recognize_sync(message)
 
     assert LawRiskFlag.NO_LAWYER not in result.risk_flags
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "尚未委托律师发生交通事故",
+        "发生交通事故后尚未委托律师",
+        "没有请发生交通事故",
+    ],
+)
+def test_hotfix_no_lawyer_phrases_do_not_suppress_traffic(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert LawRiskFlag.TRAFFIC_ACCIDENT in result.risk_flags
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags
+
+
+@pytest.mark.parametrize(
+    ("message", "risk_flag"),
+    [
+        ("尚未发生交通事故", LawRiskFlag.TRAFFIC_ACCIDENT),
+        ("尚未立案", LawRiskFlag.FILED),
+    ],
+)
+def test_hotfix_precise_event_negations_still_suppress(message, risk_flag):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert risk_flag not in result.risk_flags
