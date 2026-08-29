@@ -20,17 +20,27 @@ LawMind 是一个面向律所对外咨询场景的多 Agent 智能法律咨询�
 
 ### 1. 准备环境变量
 
-复制环境变量示例并填写 `ANTHROPIC_API_KEY` 和 `LAWMIND_SESSION_SECRET`：
+复制环境变量示例并填写全部敏感配置：
 
 ```bash
 cp .env.law.example .env
 ```
+
+启动前必须替换以下值，不要使用示例中的 `REPLACE_ME_*` 占位符：
+
+- `ANTHROPIC_API_KEY`
+- `LAWMIND_ADMIN_PASSWORD`
+- `LAWMIND_DB_PASSWORD`（PostgreSQL 密码）
+- `REDIS_PASSWORD`
+- `LAWMIND_SESSION_SECRET`
 
 生成稳定的会话密钥：
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+
+根目录 `docker-compose.yml` 是仓库唯一的 Compose 部署入口；旧的 `backend/docker-compose.yml` 和 `frontend/docker-compose.yml` 已从仓库移除。
 
 ### 2. 启动
 

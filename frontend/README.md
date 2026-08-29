@@ -64,3 +64,7 @@ npm run dev
 ```bash
 npm run build
 ```
+
+## Docker
+
+前端生产容器使用 `frontend/nginx.conf` 提供 SPA 回退。完整栈请从仓库根目录使用 `docker-compose.yml` 启动；`frontend/docker-compose.yml` 已移除，不再作为生产入口。

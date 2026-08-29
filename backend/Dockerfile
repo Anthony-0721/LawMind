@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 
 WORKDIR /app
 
@@ -14,9 +14,15 @@ RUN apt-get update \
 
 RUN useradd -m -u 1000 lawmind
 
+FROM base AS dependencies
+
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
+FROM base AS production
+
+COPY --from=dependencies /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=dependencies /usr/local/bin /usr/local/bin
 COPY --chown=lawmind:lawmind . .
 
 RUN mkdir -p /app/data/chroma /app/logs /app/config \
@@ -30,3 +36,14 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+FROM dependencies AS development
+
+COPY --chown=lawmind:lawmind . .
+
+RUN mkdir -p /app/data/chroma /app/logs /app/config /app/tests \
+    && chmod -R 777 /app/data /app/logs
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

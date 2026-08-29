@@ -6,7 +6,7 @@ services:
       - "5433:5432"
     environment:
       POSTGRES_USER: ${LAWMIND_DB_USER:-lawuser}
-      POSTGRES_PASSWORD: ${LAWMIND_DB_PASSWORD:-lawpass}
+      POSTGRES_PASSWORD: ${LAWMIND_DB_PASSWORD:-REPLACE_ME_DB_PASSWORD}
       POSTGRES_DB: ${LAWMIND_DB_NAME:-lawmind_law}
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -23,12 +23,12 @@ services:
     container_name: lawmind-redis
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-lawpass}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-REPLACE_ME_REDIS_PASSWORD}
     volumes:
       - redis-data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-lawpass}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-REPLACE_ME_REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -46,7 +46,7 @@ services:
       - chromadb-data:/chroma/chroma
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -59,14 +59,14 @@ services:
       target: production
     container_name: lawmind-api
     environment:
-      REDIS_URL: "redis://:${REDIS_PASSWORD:-lawpass}@lawmind-redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-REPLACE_ME_REDIS_PASSWORD}@lawmind-redis:6379/0"
       CHROMA_HOST: lawmind-chromadb
       CHROMA_PORT: "8000"
-      DATABASE_URL: "postgresql://${LAWMIND_DB_USER:-lawuser}:${LAWMIND_DB_PASSWORD:-lawpass}@lawmind-postgres:5432/${LAWMIND_DB_NAME:-lawmind_law}"
+      DATABASE_URL: "postgresql://${LAWMIND_DB_USER:-lawuser}:${LAWMIND_DB_PASSWORD:-REPLACE_ME_DB_PASSWORD}@lawmind-postgres:5432/${LAWMIND_DB_NAME:-lawmind_law}"
       LAWMIND_SESSION_SECRET: "${LAWMIND_SESSION_SECRET:-}"
-      LAWMIND_ADMIN_PASSWORD: "${LAWMIND_ADMIN_PASSWORD:-change_me}"
+      LAWMIND_ADMIN_PASSWORD: "${LAWMIND_ADMIN_PASSWORD:-REPLACE_ME_ADMIN_PASSWORD}"
       LAWMIND_SKILLS_DIR: /app/skills/law_firm
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-REPLACE_ME_ANTHROPIC_API_KEY}"
       ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-deepseek-v4-pro}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}"
       APP_ENV: "${APP_ENV:-production}"

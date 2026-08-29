@@ -81,7 +81,7 @@ frontend/package.json
 frontend/src/App.vue
 frontend/src/main.js
 frontend/src/lib/backends.js
-frontend/docker-compose.yml
+frontend/nginx.conf
 ```
 
 ---
@@ -1131,7 +1131,7 @@ git commit -m "feat: add law customer and staff frontend"
 - Modify: `docker-compose.yml`
 - Create: `.env.law.example`
 - Modify: `backend/Dockerfile`
-- Modify: `frontend/docker-compose.yml`
+- Modify: `frontend/nginx.conf`
 
 **Interfaces:**
 - Consumes: backend and frontend Dockerfiles
@@ -1193,7 +1193,7 @@ Expected: Compose 配置合法。
 - [ ] **Step 6: 提交**
 
 ```bash
-git add docker-compose.yml Dockerfile .env.law.example frontend/docker-compose.yml
+git add docker-compose.yml Dockerfile .env.law.example frontend/nginx.conf
 git commit -m "feat: add combined law docker compose"
 ```
 
@@ -1256,5 +1256,3 @@ git commit -m "docs: update law firm project documentation"
 - PostgreSQL `5433` 与现有 law-firm-ai `5432` 不冲突。
 - 保留原 `EscalationAgent` 作为第 4 个 Agent。
 - 保留一个共享 Chroma knowledge_base。
-
-
