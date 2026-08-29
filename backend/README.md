@@ -37,10 +37,19 @@ LawMind 后端是 Python 3.12 + FastAPI 的单体服务，负责律所法律咨�
 | 方法 | 后端路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/law/admin/login` | 登录校验 |
-| `GET` | `/law/admin/consultations` | 咨询记录列表（脱敏） |
-| `GET/PATCH/DELETE` | `/law/admin/consultations/{id}` | 详情/状态/删除 |
-| `GET/POST/PATCH/PATCH` | `/law/admin/lawyers` | 律师管理 |
-| `GET/POST/PUT/DELETE/PATCH` | `/law/admin/faqs` | FAQ 管理 |
+| `GET` | `/law/admin/consultations?limit=50` | 咨询记录列表（脱敏） |
+| `GET` | `/law/admin/consultations/{id}` | 咨询详情 |
+| `PATCH` | `/law/admin/consultations/{id}/status` | 更新状态 |
+| `DELETE` | `/law/admin/consultations/{id}` | 删除 |
+| `GET` | `/law/admin/lawyers` | 律师列表 |
+| `POST` | `/law/admin/lawyers` | 新增律师 |
+| `PATCH` | `/law/admin/lawyers/{id}` | 编辑律师 |
+| `PATCH` | `/law/admin/lawyers/{id}/toggle` | 启用/停用 |
+| `GET` | `/law/admin/faqs?active_only=false` | FAQ 列表 |
+| `POST` | `/law/admin/faqs` | 新增 FAQ |
+| `PUT` | `/law/admin/faqs/{id}` | 编辑 FAQ |
+| `DELETE` | `/law/admin/faqs/{id}` | 删除 FAQ |
+| `PATCH` | `/law/admin/faqs/{id}/toggle` | 启用/停用 |
 | `POST` | `/law/admin/knowledge/reload` | FAQ -> ChromaDB 同步 |
 | `GET` | `/law/admin/metrics` | 概览 |
 
@@ -54,9 +63,10 @@ LawMind 后端是 Python 3.12 + FastAPI 的单体服务，负责律所法律咨�
 ## 评测
 
 - 默认意图用例位于 `evaluation/evaluator.py` 的 `DEFAULT_INTENT_CASES` 和 `DEFAULT_DIALOG_CASES`。
-- 仓库基线：`backend/data/eval/law_baseline.json`。
-- 生产默认基线路径由 `EVAL_BASELINE_PATH` 覆盖，未设置时使用 `backend/data/eval/law_baseline.json`。
-- `EndToEndEvaluator.run()` 会运行意图评测；传入 `dialog_cases` 时会调用 LLM Judge；报告会写入基线文件用于趋势比较。
+- 只读归档基线：`backend/data/eval/law_baseline.json`。
+- 运行时基线：`backend/data/eval/runtime_law_baseline.json`；默认由 `EVAL_BASELINE_PATH` 覆盖，未设置时写入运行时文件。
+- 如果运行时基线缺失，`EndToEndEvaluator` 会读取归档基线用于对比，但绝不会覆写归档基线。
+- `EndToEndEvaluator.run()` 会运行意图评测；传入 `dialog_cases` 时会调用 LLM Judge；报告只会写入运行时基线用于趋势比较。
 - 评测响应元数据包含最终回复；测试要求回复保留“不构成正式法律意见”等法律边界。
 
 ## 本地运行

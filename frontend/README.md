@@ -32,14 +32,14 @@ LawMind 前端是 Vue 3 + Vite 单页应用，提供律所对外客户咨询页�
 
 ## 工作人员接口
 
-所有工作人员接口使用请求头：
+`src/lib/lawApi.js` 封装了以下工作人员接口，所有接口都要求请求头：
 
 ```text
 X-Admin-Password: <管理员密码>
 ```
 
 - `POST /api/law/admin/login`
-- `GET /api/law/admin/consultations`
+- `GET /api/law/admin/consultations?limit=50`
 - `GET /api/law/admin/consultations/{id}`
 - `PATCH /api/law/admin/consultations/{id}/status`
 - `DELETE /api/law/admin/consultations/{id}`
@@ -47,7 +47,7 @@ X-Admin-Password: <管理员密码>
 - `POST /api/law/admin/lawyers`
 - `PATCH /api/law/admin/lawyers/{id}`
 - `PATCH /api/law/admin/lawyers/{id}/toggle`
-- `GET /api/law/admin/faqs`
+- `GET /api/law/admin/faqs?active_only=false`
 - `POST /api/law/admin/faqs`
 - `PUT /api/law/admin/faqs/{id}`
 - `DELETE /api/law/admin/faqs/{id}`

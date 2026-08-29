@@ -13,7 +13,7 @@ venv/
 # 数据目录
 data/*
 !data/eval/
-!data/eval/*.json
+!data/eval/law_baseline.json
 *.db
 *.sqlite3
 logs/

@@ -11,7 +11,7 @@ __pycache__/
 data/
 !backend/data/
 !backend/data/eval/
-!backend/data/eval/*.json
+!backend/data/eval/law_baseline.json
 logs/
 
 # 数据库

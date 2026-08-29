@@ -753,5 +753,5 @@ PostgreSQL 失败降级
 - 数据：PostgreSQL（咨询/律师/FAQ）、Redis（会话记忆）、ChromaDB（`law_knowledge_base`）。
 - Skill：仅保留 `backend/skills/law_firm/` 下 4 个律所 Skill。
 - 部署：根目录 `docker-compose.yml` 为唯一入口，Nginx 统一代理。
-- 评测：`backend/data/eval/law_baseline.json`、LLM-as-Judge 和免责声明回归检查。
+- 评测：`backend/data/eval/law_baseline.json` 为只读归档；`backend/data/eval/runtime_law_baseline.json` 为运行时基线；包含 LLM-as-Judge、免责声明强制边界和回归检查。
 - 实现说明：[docs/architecture.md](../architecture.md)。

@@ -106,6 +106,13 @@ sequenceDiagram
 - Redis 用于短期会话上下文；ChromaDB 用于长期记忆/检索。
 - 本地/测试默认可使用 SQLite；Docker Compose 使用 PostgreSQL 作为事实源。
 
+## 评测基线
+
+- `backend/data/eval/law_baseline.json` 是仓库归档基线，只读。
+- `backend/data/eval/runtime_law_baseline.json` 是运行时基线，由 `EndToEndEvaluator.run()` 生成/更新。
+- 默认运行时路径可由 `EVAL_BASELINE_PATH` 覆盖；归档基线可由 `EVAL_SHIPPED_BASELINE_PATH` 覆盖，仅用于首次对比。
+- 运行时基线缺失时，系统会读取归档基线进行对比；任何评测运行都不会覆写归档基线。
+
 ## 客户流程
 
 1. 打开 `/`。
@@ -125,7 +132,7 @@ sequenceDiagram
 
 ## 安全边界
 
-- 外部只暴露 80 端口；数据库、Redis、Chroma 端口用于本机调试。
+- 生产外部入口仅为 Nginx 80 端口；`docker-compose.yml` 映射的 PostgreSQL `5433`、Redis `6379`、ChromaDB `8003` 仅用于本机调试，不作为生产暴露端口。生产环境应移除这些宿主机端口映射或限制访问来源。
 - `/api/law/chat` 使用响应白名单，不暴露 Agent、工具、实体或联系方式。
 - 工作人员接口使用 `X-Admin-Password`。
 - 会话身份依赖 `LAWMIND_SESSION_SECRET`，数据库只保存令牌哈希。

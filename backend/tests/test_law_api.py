@@ -153,6 +153,15 @@ class FakeOrchestrator:
         }
 
 
+class NoDisclaimerOrchestrator(FakeOrchestrator):
+    """Fake that intentionally omits the public legal boundary."""
+
+    async def run(self, request: Any) -> Dict[str, Any]:
+        result = await super().run(request)
+        result["response"] = "没有法律意见"
+        return result
+
+
 class FakeMemory:
     def __init__(self) -> None:
         self.get_context_user_id: Optional[str] = None
@@ -700,6 +709,24 @@ def test_transfer_rejects_internal_fields(client, consultation_service):
     })
     assert response.status_code == 422
     assert consultation_service.list_recent(limit=10) == []
+
+
+def test_public_chat_appends_disclaimer_when_orchestrator_omits_it():
+    app = FastAPI()
+    app.include_router(law_router)
+    memory = FakeMemory()
+    configure_app_law_services(
+        app,
+        orchestrator=NoDisclaimerOrchestrator(),
+        memory=memory,
+    )
+    client = TestClient(app)
+
+    response = client.post("/law/chat", json={"message": "醉驾被查了会怎么样？"})
+
+    assert response.status_code == 200
+    assert "没有法律意见" in response.json()["response"]
+    assert "本回复仅供初步参考，不构成正式法律意见。" in response.json()["response"]
 
 
 def test_admin_faq_crud_with_sync_fake(client, monkeypatch, faq_service):

@@ -1,8 +1,8 @@
-# LawMind 律所版 Implementation Plan
+# LawMind 律所版 Implementation Plan（已定稿）
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **实现状态（2026-08-30）：** 已实施。最终仓库为 Python/FastAPI 单后端 + Vue 3/Vite 前端；未保留旧客服 Skills 或 Java 服务；根目录 `docker-compose.yml` 是唯一部署入口。详细说明见 [docs/architecture.md](../architecture.md)。
+> **实现状态（2026-08-30）：** 已实施并通过任务 12 复审修正：公共 API 强制免责声明、运行时/归档基线分离、旧部署配置删除、文档端点精确化。最终仓库为 Python/FastAPI 单后端 + Vue 3/Vite 前端；未保留旧客服 Skills 或 Java 服务；根目录 `docker-compose.yml` 是唯一部署入口。详细说明见 [docs/architecture.md](../architecture.md)。
 
 **Goal:** 构建独立运行的 LawMind 律所对外智能法律咨询系统，保留核心多 Agent 架构，新增法律意图、4 个 Agent、律所 Skills、PostgreSQL 咨询/FAQ/律师数据、staff 页面和联合 Docker Compose。
 
@@ -118,7 +118,6 @@ monitor
 evaluation
 skills
 data
-config
 requirements.txt
 Dockerfile
 README.md
@@ -1194,8 +1193,9 @@ git commit -m "feat: add combined law docker compose"
 ### Task 12: 评测用例、文档与最终回归
 
 **Files:**
-- Modify: `backend/evaluation/evaluator.py`
-- Create: `backend/data/eval/law_baseline.json`
+- Modify: `backend/evaluation/evaluator.py`、`backend/api/law_routes.py`
+- Create: `backend/data/eval/law_baseline.json`（只读归档）
+- Runtime: `backend/data/eval/runtime_law_baseline.json`（运行结果，不提交）
 - Modify: `README.md`
 - Modify: design docs
 
@@ -1254,7 +1254,8 @@ git commit -m "docs: update law firm project documentation"
 ## 最终回归记录（Task 12）
 
 - 默认评测：`DEFAULT_INTENT_CASES` / `DEFAULT_DIALOG_CASES` 已面向 LawMind。
-- 基线：`backend/data/eval/law_baseline.json`。
+- 归档基线：`backend/data/eval/law_baseline.json`（只读）。
+- 运行时基线：`backend/data/eval/runtime_law_baseline.json`（可生成/更新，不提交）。
 - 免责声明：API 与评测测试均检查“不构成正式法律意见”。
 - 后端测试：`python -m pytest tests -v -p no:cacheprovider`。
 - 前端构建：`npm run build`。

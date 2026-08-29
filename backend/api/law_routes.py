@@ -61,6 +61,19 @@ RISK_FLAG_LABELS = {
 
 _CONSULTATION_STATUSES = frozenset({"PENDING", "CONTACTED", "BOOKED", "CLOSED"})
 
+PUBLIC_LEGAL_DISCLAIMER = "本回复仅供初步参考，不构成正式法律意见。"
+
+
+def _ensure_public_legal_disclaimer(value: Any) -> str:
+    """Return text with the public legal boundary appended when missing."""
+    text = str(value or "")
+    if not text:
+        return PUBLIC_LEGAL_DISCLAIMER
+    if PUBLIC_LEGAL_DISCLAIMER in text:
+        return text
+    return f"{text}\n\n{PUBLIC_LEGAL_DISCLAIMER}"
+
+
 
 class LawChatRequest(BaseModel):
     message: str
@@ -710,7 +723,7 @@ def create_public_consultation(
         "conversation_id": payload.get("conversation_id"),
         "session_token": payload.get("session_token"),
         "status": saved.get("status") or "PENDING",
-        "message": "咨询已提交，我们会尽快联系您",
+        "message": _ensure_public_legal_disclaimer("咨询已提交，我们会尽快联系您"),
     }
 
 
@@ -757,7 +770,7 @@ def create_transfer_request(
         "conversation_id": payload.get("conversation_id"),
         "session_token": payload.get("session_token"),
         "status": saved.get("status") or "PENDING",
-        "message": "已收到您的转人工请求，工作人员将尽快与您联系",
+        "message": _ensure_public_legal_disclaimer("已收到您的转人工请求，工作人员将尽快与您联系"),
     }
 
 
@@ -864,7 +877,9 @@ async def law_chat(
         result = await run_call if inspect.isawaitable(run_call) else run_call
 
     resolved_request_id = request_id
-    response_text = str(_value_or_none(result, "response", "") or "")
+    response_text = _ensure_public_legal_disclaimer(
+        _value_or_none(result, "response", "") or ""
+    )
 
     if memory is not None:
         add_message = getattr(memory, "add_message", None)
@@ -1263,6 +1278,7 @@ law_router.include_router(admin_router)
 
 
 __all__ = [
+    "PUBLIC_LEGAL_DISCLAIMER",
     "LawChatPublicResponse",
     "LawChatRequest",
     "derive_user_id",

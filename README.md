@@ -56,7 +56,7 @@ flowchart LR
 | --- | --- | --- |
 | `POST` | `/api/law/chat` | 法律咨询对话 |
 | `GET` | `/api/law/options` | 领域、紧急度、风险选项 |
-| `GET` | `/api/law/lawyers` | 推荐律师 |
+| `GET` | `/api/law/lawyers?domain=<domain>` | 推荐律师（`domain` 可选） |
 | `POST` | `/api/law/consultations` | 客户留资/登记 |
 | `POST` | `/api/law/transfer` | 转人工/高优先级留资 |
 
@@ -65,13 +65,25 @@ flowchart LR
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/law/admin/login` | 工作人员登录校验 |
-| `GET/PATCH/DELETE` | `/api/law/admin/consultations` | 咨询记录列表、状态、删除 |
-| `GET/POST/PATCH/DELETE` | `/api/law/admin/lawyers` | 律师管理 |
-| `GET/POST/PUT/DELETE/PATCH` | `/api/law/admin/faqs` | FAQ 管理 |
+| `GET` | `/api/law/admin/consultations?limit=50` | 咨询记录列表（联系方式脱敏） |
+| `GET` | `/api/law/admin/consultations/{id}` | 咨询记录详情 |
+| `PATCH` | `/api/law/admin/consultations/{id}/status` | 更新咨询状态 |
+| `DELETE` | `/api/law/admin/consultations/{id}` | 删除咨询记录 |
+| `GET` | `/api/law/admin/lawyers` | 律师列表 |
+| `POST` | `/api/law/admin/lawyers` | 新增律师 |
+| `PATCH` | `/api/law/admin/lawyers/{id}` | 编辑律师 |
+| `PATCH` | `/api/law/admin/lawyers/{id}/toggle` | 启用/停用律师 |
+| `GET` | `/api/law/admin/faqs?active_only=false` | FAQ 列表 |
+| `POST` | `/api/law/admin/faqs` | 新增 FAQ |
+| `PUT` | `/api/law/admin/faqs/{id}` | 编辑 FAQ |
+| `DELETE` | `/api/law/admin/faqs/{id}` | 删除 FAQ |
+| `PATCH` | `/api/law/admin/faqs/{id}/toggle` | 启用/停用 FAQ |
 | `POST` | `/api/law/admin/knowledge/reload` | 同步 FAQ 到 ChromaDB |
 | `GET` | `/api/law/admin/metrics` | 咨询/律师/FAQ 概览 |
 
 后端还提供 `/health`、`/docs`、`/openapi.json` 和 `/eval/run`；前端生产环境只暴露 `/api/law` 系列与受保护的文档/健康检查，不暴露 Agent、工具 trace 或调试接口。
+
+评测使用两个基线文件：`backend/data/eval/law_baseline.json` 是只读归档基线；`backend/data/eval/runtime_law_baseline.json` 是运行时基线（可由 `EVAL_BASELINE_PATH` 覆盖），运行结果只会写入后者，不会覆写归档基线。
 
 ## 环境要求
 

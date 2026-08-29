@@ -16,6 +16,8 @@ from evaluation.evaluator import (
     EndToEndEvaluator,
     IntentEvaluator,
     IntentTestCase,
+    RUNTIME_BASELINE_PATH,
+    SHIPPED_BASELINE_PATH,
 )
 
 
@@ -183,3 +185,72 @@ def test_shipped_law_baseline_is_valid_and_loaded():
     assert report.passed >= 1
     assert report.avg_scores.get("intent_accuracy", 0.0) >= 0.9
     assert report.results[0].test_id == "intent_recognition"
+
+def test_runtime_and_shipped_baseline_paths_are_separate():
+    assert RUNTIME_BASELINE_PATH.endswith("runtime_law_baseline.json")
+    assert SHIPPED_BASELINE_PATH.endswith("law_baseline.json")
+    assert RUNTIME_BASELINE_PATH != SHIPPED_BASELINE_PATH
+
+
+def test_runtime_baseline_missing_loads_shipped_for_comparison():
+    evaluator = EndToEndEvaluator(
+        orchestrator=None,
+        recognizer=make_recognizer(),
+        api_key="test-key",
+        model="test-model",
+        client=FakeClient(),
+        baseline_path=str(Path("__missing_runtime_baseline__.json")),
+        shipped_baseline_path=SHIPPED_BASELINE_PATH,
+    )
+    assert evaluator._baseline is not None
+    assert evaluator._baseline.results[0].test_id == "intent_recognition"
+
+
+def test_runtime_baseline_save_does_not_write_shipped(monkeypatch):
+    writes = []
+
+    def fake_write_text(self, *args, **kwargs):
+        writes.append(str(self))
+
+    monkeypatch.setattr(Path, "write_text", fake_write_text)
+    runtime = "runtime_law_baseline.json"
+    evaluator = EndToEndEvaluator(
+        orchestrator=None,
+        recognizer=make_recognizer(),
+        api_key="test-key",
+        model="test-model",
+        client=FakeClient(),
+        baseline_path=runtime,
+        shipped_baseline_path=SHIPPED_BASELINE_PATH,
+    )
+
+    asyncio.run(evaluator.run(intent_cases=[
+        IntentTestCase("醉驾被查了会怎么样？", "dangerous_driving"),
+    ]))
+
+    assert runtime in writes
+    assert str(Path(SHIPPED_BASELINE_PATH)) not in writes
+
+
+def test_save_refuses_to_overwrite_shipped_baseline(monkeypatch):
+    writes = []
+
+    def fake_write_text(self, *args, **kwargs):
+        writes.append(str(self))
+
+    monkeypatch.setattr(Path, "write_text", fake_write_text)
+    evaluator = EndToEndEvaluator(
+        orchestrator=None,
+        recognizer=make_recognizer(),
+        api_key="test-key",
+        model="test-model",
+        client=FakeClient(),
+        baseline_path=SHIPPED_BASELINE_PATH,
+        shipped_baseline_path=SHIPPED_BASELINE_PATH,
+    )
+
+    asyncio.run(evaluator.run(intent_cases=[
+        IntentTestCase("醉驾被查了会怎么样？", "dangerous_driving"),
+    ]))
+
+    assert writes == []
