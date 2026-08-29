@@ -52,6 +52,11 @@ def _ensure_consultation_columns() -> None:
                     "ALTER TABLE consultations "
                     "ADD COLUMN session_token_hash VARCHAR(64) NOT NULL DEFAULT ''"
                 ))
+            if "session_token_version" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE consultations "
+                    "ADD COLUMN session_token_version INTEGER NOT NULL DEFAULT 1"
+                ))
     except Exception:
         # Legacy databases without the columns should not block startup; the
         # ORM create_all path will handle fresh databases.
@@ -60,7 +65,15 @@ def _ensure_consultation_columns() -> None:
 
 def backfill_session_token_hashes(target_engine: Any = None) -> int:
     """Backfill empty session hashes for legacy consultation rows, idempotently."""
-    from services.session_identity import hash_session_token, make_session_token
+    from services.session_identity import (
+        get_session_secret,
+        hash_session_token,
+        make_session_token,
+    )
+
+    # Fail startup with the required-secret contract instead of silently
+    # skipping the migration or inventing an unstable fallback.
+    get_session_secret()
 
     target = target_engine or engine
     count = 0

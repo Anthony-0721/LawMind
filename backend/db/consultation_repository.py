@@ -167,6 +167,7 @@ def _record_to_dict(record: Consultation) -> Dict[str, Any]:
         "request_id": record.request_id,
         "conversation_id": record.conversation_id,
         "session_token_hash": record.session_token_hash,
+        "session_token_version": record.session_token_version,
         "user_id": record.user_id,
         "contact_name": record.contact_name,
         "contact_phone": record.contact_phone,

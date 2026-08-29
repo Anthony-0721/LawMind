@@ -1,37 +1,23 @@
 """Stable session identity helpers shared by API and database migration code.
 
-``LAWMIND_SESSION_SECRET`` should be configured in production. When unset, this
-module uses one process-random secret so no predictable shared fallback exists.
+``LAWMIND_SESSION_SECRET`` is required at runtime. No random or shared
+fallback is used; deployments must configure a stable secret.
 """
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
-import secrets
-from typing import Optional
-
-logger = logging.getLogger(__name__)
-
-_process_secret: Optional[str] = None
-_warned = False
 
 
 def get_session_secret() -> str:
-    """Return the configured secret or a single process-random fallback."""
-    global _process_secret, _warned
+    """Return the required stable session secret.
+
+    Raises RuntimeError when ``LAWMIND_SESSION_SECRET`` is not configured.
+    """
     value = os.getenv("LAWMIND_SESSION_SECRET", "")
-    if value.strip():
-        return value.strip()
-    if _process_secret is None:
-        _process_secret = secrets.token_urlsafe(32)
-        if not _warned:
-            _warned = True
-            logger.warning(
-                "LAWMIND_SESSION_SECRET is not set; using a process-random "
-                "session secret. Set it for stable identities across restarts."
-            )
-    return _process_secret
+    if not value.strip():
+        raise RuntimeError("LAWMIND_SESSION_SECRET is required")
+    return value.strip()
 
 
 def derive_user_id(conversation_id: str) -> str:

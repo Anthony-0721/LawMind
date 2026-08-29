@@ -7,6 +7,7 @@ call is made.
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +32,11 @@ from services.consultation_service import ConsultationService
 from services.session_identity import get_session_secret
 from services.faq_sync_service import RequestScopedFaqSyncService
 from services.lawyer_recommendation import LawyerService
+
+
+@pytest.fixture(autouse=True)
+def _lawmind_session_secret(monkeypatch):
+    monkeypatch.setenv("LAWMIND_SESSION_SECRET", "test-session-secret")
 
 
 class FakeFaqSyncService:
@@ -554,9 +560,20 @@ def test_legacy_session_token_hash_is_backfilled_and_updatable(client, session_f
             status="PENDING",
             session_token_hash="",
         )
-        session.add(record)
+        already_hashed = Consultation(
+            request_id="legacy-backfill-nonempty",
+            conversation_id="legacy-conv-hashed",
+            contact_name="王*",
+            contact_phone="13900001234",
+            consent=True,
+            legal_domain="civil",
+            status="PENDING",
+            session_token_hash="already-hashed",
+        )
+        session.add_all([record, already_hashed])
         session.commit()
         record_id = record.id
+        already_hashed_id = already_hashed.id
     finally:
         session.close()
 
@@ -568,6 +585,9 @@ def test_legacy_session_token_hash_is_backfilled_and_updatable(client, session_f
         assert record.session_token_hash == hash_session_token(
             make_session_token("legacy-conv")
         )
+        assert record.session_token_version == 1
+        nonempty = session.get(Consultation, already_hashed_id)
+        assert nonempty.session_token_hash == "already-hashed"
     finally:
         session.close()
 
@@ -583,11 +603,25 @@ def test_legacy_session_token_hash_is_backfilled_and_updatable(client, session_f
     assert consultation_service.get_by_conversation_id("legacy-conv")["contact_name"] == "李四"
 
 
-def test_session_secret_has_no_predictable_default(monkeypatch):
+def test_session_secret_is_required(monkeypatch):
     monkeypatch.delenv("LAWMIND_SESSION_SECRET", raising=False)
-    secret = get_session_secret()
-    assert secret
-    assert secret != "lawmind-dev-session-secret"
+    with pytest.raises(RuntimeError, match="LAWMIND_SESSION_SECRET is required"):
+        get_session_secret()
+
+
+def test_env_law_example_does_not_contain_usable_secret():
+    example = Path(__file__).resolve().parents[2] / ".env.law.example"
+    text = example.read_text(encoding="utf-8")
+    assert "secrets.token_urlsafe(32)" in text
+    assert "LAWMIND_SESSION_SECRET=" in text
+    lines = text.splitlines()
+    secret_lines = [
+        line for line in lines
+        if line.startswith("LAWMIND_SESSION_SECRET=")
+    ]
+    assert len(secret_lines) == 1
+    assert secret_lines[0].split("=", 1)[1] == ""
+    assert "change_me_generate_with_secrets" not in text
 
 
 def test_transfer_persists_lead(client, consultation_service):

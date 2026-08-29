@@ -76,6 +76,7 @@ def _payload_dict(source: Any) -> Dict[str, Any]:
         "request_id",
         "conversation_id",
         "session_token_hash",
+        "session_token_version",
         "user_id",
         "contact_name",
         "contact_phone",

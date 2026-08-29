@@ -45,6 +45,7 @@ class Consultation(Base):
     session_token_hash: Mapped[str] = mapped_column(
         String(64), default="", nullable=False
     )
+    session_token_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     contact_name: Mapped[str] = mapped_column(String(100), default="", nullable=False)
     contact_phone: Mapped[str] = mapped_column(String(30), default="", nullable=False)
