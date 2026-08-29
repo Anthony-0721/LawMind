@@ -25,8 +25,8 @@ COPY --from=dependencies /usr/local/lib/python3.12/site-packages /usr/local/lib/
 COPY --from=dependencies /usr/local/bin /usr/local/bin
 COPY --chown=lawmind:lawmind . .
 
-RUN mkdir -p /app/data/chroma /app/logs /app/config \
-    && chown lawmind:lawmind /app/data /app/data/chroma /app/logs /app/config
+RUN mkdir -p /app/data/chroma /app/logs \
+    && chown lawmind:lawmind /app/data /app/data/chroma /app/logs
 
 USER lawmind
 
@@ -41,7 +41,7 @@ FROM dependencies AS development
 
 COPY --chown=lawmind:lawmind . .
 
-RUN mkdir -p /app/data/chroma /app/logs /app/config /app/tests \
+RUN mkdir -p /app/data/chroma /app/logs /app/tests \
     && chmod -R 777 /app/data /app/logs
 
 EXPOSE 8000

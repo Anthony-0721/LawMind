@@ -32,7 +32,7 @@ LawMind 后端是 Python 3.12 + FastAPI 的单体服务，负责律所法律咨�
 | `POST` | `/law/consultations` | 客户留资 |
 | `POST` | `/law/transfer` | 转人工 |
 
-工作人员接口（需要 `X-Admin-Password`）：
+工作人员认证：`POST /law/admin/login` 使用 JSON 请求体 `{"password": "..."}`；除登录外，其余工作人员接口需要 `X-Admin-Password` 请求头。
 
 | 方法 | 后端路径 | 说明 |
 | --- | --- | --- |
@@ -105,4 +105,4 @@ python -m pytest tests -v -p no:cacheprovider
 - 对外 `/law/chat` 响应经过白名单，不泄露 Agent 路由、工具、实体或联系方式。
 - 咨询/律师/FAQ 管理接口统一受管理员密码保护。
 - FAQ/错误日志会清除手机号、身份证号、邮箱和业务敏感内容。
-- 所有法律回复和种子知识都包含“不构成正式法律意见”的提示。
+- 公开 API 边界会统一追加“本回复仅供初步参考，不构成正式法律意见。”；种子知识以最终回复为准。

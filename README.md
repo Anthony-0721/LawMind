@@ -60,7 +60,7 @@ flowchart LR
 | `POST` | `/api/law/consultations` | 客户留资/登记 |
 | `POST` | `/api/law/transfer` | 转人工/高优先级留资 |
 
-工作人员接口（以下接口均要求 `X-Admin-Password` 请求头）：
+工作人员认证：`POST /api/law/admin/login` 使用 JSON 请求体 `{"password": "..."}` 校验；除登录外，以下接口均要求 `X-Admin-Password` 请求头。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -184,13 +184,13 @@ npm run build
 ## 安全说明
 
 - `LAWMIND_SESSION_SECRET` 是必需配置：未设置时会话身份接口会抛出运行时错误，不会使用随机或共享默认值。生成并保存为稳定密钥后，请勿在多个环境间共享同一密钥。
-- `LAWMIND_ADMIN_PASSWORD` 用于工作人员接口，每次请求通过 `X-Admin-Password` 请求头传递，并使用常量时间比较。
+- `LAWMIND_ADMIN_PASSWORD` 用于 `/api/law/admin/login` 的 JSON `password` 字段校验，以及其他工作人员接口的 `X-Admin-Password` 请求头校验。
 - PostgreSQL、Redis 和 ChromaDB 由 Compose 内部网络访问，宿主机端口仅用于本地调试；生产环境应限制端口暴露并启用 TLS。
 - PII 最小化：仅在有明确授权且业务需要时收集姓名、手机号、城市等；不索取身份证号、银行卡号、密码或短信验证码。
 - 会话令牌在数据库中只保存哈希，不保存明文；咨询记录列表默认对联系方式脱敏。
 - 对外 `/api/law/chat` 响应使用白名单字段，不返回 `agent_type`、`entities`、工具 trace 或内部路由信息。
 - 日志和错误信息会清除 FAQ 内容、手机号、身份证号等敏感值。
-- 所有法律回答应包含“不构成正式法律意见”的边界提示；高风险场景优先转人工而非继续分析。
+- 公开 API 边界会统一追加“本回复仅供初步参考，不构成正式法律意见。”；种子知识以最终回复为准。高风险场景优先转人工而非继续分析。
 - 生产环境建议关闭 CORS 通配、限制管理后台访问来源，并定期轮换密钥和值班密码。
 
 ## 目录

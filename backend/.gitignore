@@ -28,9 +28,6 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Docker 构建产物
-build-image*.sh
-
 # ChromaDB 本地数据
 *.db
 *.sqlite3

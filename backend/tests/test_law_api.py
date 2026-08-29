@@ -303,6 +303,7 @@ def test_public_consultation_happy_path(client, consultation_service):
     assert data["session_token"]
     assert data["status"] == "PENDING"
     assert data["message"]
+    assert "本回复仅供初步参考，不构成正式法律意见。" in data["message"]
     assert "request_id" not in data
 
     records = consultation_service.list_recent(limit=10)
@@ -649,6 +650,7 @@ def test_transfer_persists_lead(client, consultation_service):
     assert data["session_token"]
     assert data["status"] == "PENDING"
     assert data["message"]
+    assert "本回复仅供初步参考，不构成正式法律意见。" in data["message"]
 
     records = consultation_service.list_recent(limit=10)
     assert len(records) == 1
