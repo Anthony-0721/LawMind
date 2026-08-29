@@ -32,30 +32,37 @@ SessionLocal = sessionmaker(
 )
 
 
-def _ensure_conversation_column() -> None:
-    """Add conversation_id to pre-existing consultation tables when missing."""
+def _ensure_consultation_columns() -> None:
+    """Add modern consultation ownership columns when missing."""
     try:
         inspector = inspect(engine)
         if "consultations" not in inspector.get_table_names():
             return
         columns = {column["name"] for column in inspector.get_columns("consultations")}
-        if "conversation_id" in columns:
-            return
         with engine.begin() as connection:
-            connection.execute(text(
-                "ALTER TABLE consultations "
-                "ADD COLUMN conversation_id VARCHAR(128) NOT NULL DEFAULT ''"
-            ))
+            if "conversation_id" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE consultations "
+                    "ADD COLUMN conversation_id VARCHAR(128) NOT NULL DEFAULT ''"
+                ))
+            if "session_token_hash" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE consultations "
+                    "ADD COLUMN session_token_hash VARCHAR(64) NOT NULL DEFAULT ''"
+                ))
     except Exception:
-        # Legacy databases without the column should not block startup; the
+        # Legacy databases without the columns should not block startup; the
         # ORM create_all path will handle fresh databases.
         return
+
+
+_ensure_conversation_column = _ensure_consultation_columns
 
 
 def init_db() -> None:
     """Create all configured tables for the current database engine."""
     Base.metadata.create_all(bind=engine)
-    _ensure_conversation_column()
+    _ensure_consultation_columns()
 
 
 __all__ = ["DATABASE_URL", "engine", "SessionLocal", "init_db"]

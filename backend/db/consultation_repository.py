@@ -6,6 +6,7 @@ response models without managing session lifecycle or detached instances.
 """
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
@@ -165,6 +166,7 @@ def _record_to_dict(record: Consultation) -> Dict[str, Any]:
         "id": record.id,
         "request_id": record.request_id,
         "conversation_id": record.conversation_id,
+        "session_token_hash": record.session_token_hash,
         "user_id": record.user_id,
         "contact_name": record.contact_name,
         "contact_phone": record.contact_phone,
@@ -258,6 +260,13 @@ class ConsultationRepository:
                 )
             )
             if existing is not None:
+                supplied_hash = str(data.get("session_token_hash") or "")
+                stored_hash = str(existing.session_token_hash or "")
+                if not supplied_hash or not secrets.compare_digest(
+                    supplied_hash,
+                    stored_hash,
+                ):
+                    raise ConsultationStoreError("consultation ownership failed")
                 updates = self._model_fields(data)
                 for key in (
                     "contact_name",

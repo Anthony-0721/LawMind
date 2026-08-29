@@ -6,6 +6,7 @@ call is made.
 """
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -16,7 +17,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from api.law_routes import configure_app_law_services, law_router
+from api.law_routes import (
+    configure_app_law_services,
+    derive_user_id,
+    hash_session_token,
+    law_router,
+    make_session_token,
+)
 from db.models import Base
 from services.consultation_service import ConsultationService
 from services.faq_sync_service import RequestScopedFaqSyncService
@@ -223,6 +230,7 @@ def _valid_consultation() -> Dict[str, Any]:
 
 def _valid_transfer() -> Dict[str, Any]:
     return {
+        "session_token": "transfer-token",
         "name": "李四",
         "phone": "13900139000",
         "consent": "是",
@@ -274,6 +282,8 @@ def test_public_consultation_happy_path(client, consultation_service):
     assert response.status_code == 200
     data = response.json()
     assert data["consultation_id"]
+    assert data["conversation_id"] == "conv-public-1"
+    assert data["session_token"]
     assert data["status"] == "PENDING"
     assert data["message"]
     assert "request_id" not in data
@@ -282,6 +292,7 @@ def test_public_consultation_happy_path(client, consultation_service):
     assert len(records) == 1
     assert records[0]["status"] == "PENDING"
     assert records[0]["conversation_id"] == "conv-public-1"
+    assert records[0]["session_token_hash"] == hash_session_token(data["session_token"])
 
 
 def test_invalid_consultation_returns_422_and_no_pending(client, consultation_service):
@@ -330,7 +341,9 @@ def test_public_consultation_existing_conversation_updates_only_public_fields(
         "city": "上海",
         "legal_domain": "dangerous_driving",
     })
-    record_id = first.json()["consultation_id"]
+    data = first.json()
+    record_id = data["consultation_id"]
+    session_token = data["session_token"]
     original = consultation_service.get_by_id(record_id)
     original_request_id = original["request_id"]
 
@@ -340,7 +353,7 @@ def test_public_consultation_existing_conversation_updates_only_public_fields(
         headers=headers,
     )
 
-    second = client.post("/law/consultations", json={
+    missing = client.post("/law/consultations", json={
         "conversation_id": "conv-update-1",
         "name": "李四",
         "phone": "13900139000",
@@ -349,7 +362,32 @@ def test_public_consultation_existing_conversation_updates_only_public_fields(
         "preferred_time": "明天上午",
         "legal_domain": "contract_dispute",
     })
+    assert missing.status_code == 403
+
+    wrong = client.post("/law/consultations", json={
+        "conversation_id": "conv-update-1",
+        "session_token": "wrong-token",
+        "name": "李四",
+        "phone": "13900139000",
+        "consent": True,
+        "city": "北京",
+        "preferred_time": "明天上午",
+        "legal_domain": "contract_dispute",
+    })
+    assert wrong.status_code == 403
+
+    second = client.post("/law/consultations", json={
+        "conversation_id": "conv-update-1",
+        "session_token": session_token,
+        "name": "李四",
+        "phone": "13900139000",
+        "consent": True,
+        "city": "北京",
+        "preferred_time": "明天上午",
+        "legal_domain": "contract_dispute",
+    })
     assert second.status_code == 200
+    assert second.json()["session_token"] == session_token
     assert second.json()["consultation_id"] == record_id
 
     records = consultation_service.list_recent(limit=10)
@@ -363,6 +401,44 @@ def test_public_consultation_existing_conversation_updates_only_public_fields(
     assert record["legal_domain"] == "dangerous_driving"
     assert record["source"] == "public"
     assert record["request_id"] == original_request_id
+
+
+def test_session_identity_helpers_are_stable(monkeypatch):
+    monkeypatch.setenv("LAWMIND_SESSION_SECRET", "test-secret")
+    first = derive_user_id("stable-conv")
+    second = derive_user_id("stable-conv")
+    assert first == second
+    assert len(first) == 16
+    assert make_session_token("stable-conv") == make_session_token("stable-conv")
+    assert hash_session_token(make_session_token("stable-conv")) == hash_session_token(
+        make_session_token("stable-conv")
+    )
+
+
+def test_first_consultation_save_returns_generated_session_identity(client, consultation_service):
+    response = client.post("/law/consultations", json={
+        "name": "张三",
+        "phone": "13800001234",
+        "consent": True,
+        "city": "上海",
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["conversation_id"]
+    assert data["session_token"]
+    record = consultation_service.get_by_conversation_id(data["conversation_id"])
+    assert record["session_token_hash"] == hash_session_token(data["session_token"])
+
+    update = client.post("/law/consultations", json={
+        "conversation_id": data["conversation_id"],
+        "session_token": data["session_token"],
+        "name": "李四",
+        "phone": "13900139000",
+        "consent": True,
+        "city": "北京",
+    })
+    assert update.status_code == 200
+    assert consultation_service.list_recent(limit=10)[0]["id"] == data["consultation_id"]
 
 
 def test_admin_auth_requires_password(client, monkeypatch):
@@ -467,8 +543,16 @@ def test_transfer_persists_lead(client, consultation_service):
     response = client.post("/law/transfer", json=_valid_transfer())
     assert response.status_code == 200
     data = response.json()
-    assert set(data.keys()) == {"consultation_id", "status", "message"}
+    assert set(data.keys()) == {
+        "consultation_id",
+        "conversation_id",
+        "session_token",
+        "status",
+        "message",
+    }
     assert data["consultation_id"]
+    assert data["conversation_id"]
+    assert data["session_token"] == "transfer-token"
     assert data["status"] == "PENDING"
     assert data["message"]
 
@@ -570,6 +654,7 @@ def test_law_chat_uses_whitelisted_response_and_server_token():
     assert set(data.keys()) == {
         "request_id",
         "conversation_id",
+        "session_token",
         "response",
         "intent",
         "intent_group",
@@ -582,6 +667,7 @@ def test_law_chat_uses_whitelisted_response_and_server_token():
     }
     assert data["request_id"] != "client-request"
     assert data["conversation_id"] == "client-conv"
+    assert data["session_token"]
     assert data["response"]
     assert data["intent"] == "dangerous_driving"
     assert data["case_stage"] == "拘留"
@@ -592,14 +678,26 @@ def test_law_chat_uses_whitelisted_response_and_server_token():
     assert "entities" not in data
     assert "phone" not in data
 
-    assert memory.get_context_user_id.startswith("lawmind-session:")
-    assert memory.get_context_user_id != "evil-user"
+    first_user_id = memory.get_context_user_id
+    assert first_user_id == derive_user_id("client-conv")
+    assert first_user_id != "evil-user"
     assert memory.get_context_conversation_id == "client-conv"
-    assert memory.profile_user_id.startswith("lawmind-session:")
+    assert memory.profile_user_id == first_user_id
+
+    response2 = client.post("/law/chat", json={
+        "message": "继续咨询",
+        "conversation_id": "client-conv",
+        "user_id": "another-evil-user",
+    })
+    assert response2.status_code == 200
+    assert memory.get_context_user_id == first_user_id
+    assert response2.json()["session_token"] == data["session_token"]
 
     generated = client.post("/law/chat", json={"message": "生成会话"})
     assert generated.status_code == 200
-    assert generated.json()["conversation_id"].startswith("lawmind-session:")
+    assert generated.json()["conversation_id"]
+    assert generated.json()["session_token"]
+    uuid.UUID(generated.json()["conversation_id"])
 
 
 def test_admin_faq_crud_with_sqlite_and_request_scoped_sync(monkeypatch, session_factory):

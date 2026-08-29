@@ -7,6 +7,7 @@ lifespan or making LLM calls.
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
 import os
 import re
@@ -71,6 +72,7 @@ class LawChatPublicResponse(BaseModel):
 
     request_id: str
     conversation_id: str
+    session_token: str
     response: str
     intent: str = ""
     intent_group: str = ""
@@ -119,6 +121,7 @@ class LawConsultationPublicRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conversation_id: Optional[str] = None
+    session_token: Optional[str] = None
     name: str
     phone: str
     city: Optional[str] = None
@@ -152,6 +155,7 @@ class LawTransferRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    session_token: Optional[str] = None
     name: str
     phone: str
     city: Optional[str] = None
@@ -338,9 +342,29 @@ class _PublicRole:
         self.value = value
 
 
-def _server_token() -> str:
-    prefix = os.getenv("LAWMIND_SESSION_PREFIX", "lawmind-session")
-    return f"{prefix}:{uuid.uuid4()}"
+def _session_secret() -> str:
+    return os.getenv("LAWMIND_SESSION_SECRET") or "lawmind-dev-session-secret"
+
+
+def derive_user_id(conversation_id: str) -> str:
+    """Derive a stable internal user id from the server secret + conversation."""
+    return hashlib.sha256(
+        (_session_secret() + str(conversation_id or "")).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def make_session_token(conversation_id: str) -> str:
+    """Return the deterministic server-issued token for a conversation."""
+    return hashlib.sha256(
+        (_session_secret() + ":session:" + str(conversation_id or "")).encode("utf-8")
+    ).hexdigest()[:32]
+
+
+def hash_session_token(session_token: str) -> str:
+    """Hash a session token before persistence."""
+    return hashlib.sha256(
+        (_session_secret() + ":hash:" + str(session_token or "")).encode("utf-8")
+    ).hexdigest()
 
 
 def _lead_payload(
@@ -352,12 +376,17 @@ def _lead_payload(
     consent: Any,
     legal_domain: Optional[str] = None,
     conversation_id: Optional[str] = None,
+    session_token: Optional[str] = None,
     source: str = "public",
 ) -> Dict[str, Any]:
-    """Build a server-trusted public lead payload."""
+    """Build a server-trusted public lead payload with ownership token."""
+    resolved_conversation_id = conversation_id or str(uuid.uuid4())
+    resolved_session_token = session_token or make_session_token(resolved_conversation_id)
     payload = {
-        "conversation_id": conversation_id or _server_token(),
-        "user_id": _server_token(),
+        "conversation_id": resolved_conversation_id,
+        "session_token": resolved_session_token,
+        "session_token_hash": hash_session_token(resolved_session_token),
+        "user_id": derive_user_id(resolved_conversation_id),
         "contact_name": str(name or "").strip(),
         "contact_phone": str(phone or "").strip(),
         "consent": consent,
@@ -371,6 +400,34 @@ def _lead_payload(
     if legal_domain is not None:
         payload["legal_domain"] = str(legal_domain or "").strip()
     return payload
+
+
+def _validate_consultation_ownership(
+    consultation_service: Any,
+    conversation_id: Optional[str],
+    session_token: Optional[str],
+) -> None:
+    """Reject updates or tampering on conversations owned by another token."""
+    if not conversation_id:
+        return
+    existing = _optional_call(
+        consultation_service,
+        "get_by_conversation_id",
+        str(conversation_id),
+    )
+    if existing is not None:
+        stored_hash = str(existing.get("session_token_hash") or "")
+        if not session_token or not secrets.compare_digest(
+            hash_session_token(session_token),
+            stored_hash,
+        ):
+            raise HTTPException(status_code=403, detail="会话所有权校验失败")
+        return
+    if session_token is not None and not secrets.compare_digest(
+        str(session_token),
+        make_session_token(str(conversation_id)),
+    ):
+        raise HTTPException(status_code=403, detail="会话令牌无效")
 
 
 def _mask_name(value: Any) -> str:
@@ -639,8 +696,14 @@ def create_public_consultation(
     consultation_service = _require(
         runtime, "consultation_service", "咨询记录服务未初始化"
     )
+    _validate_consultation_ownership(
+        consultation_service,
+        body.conversation_id,
+        body.session_token,
+    )
     payload = _lead_payload(
         conversation_id=body.conversation_id,
+        session_token=body.session_token,
         name=body.name,
         phone=body.phone,
         city=body.city,
@@ -659,6 +722,8 @@ def create_public_consultation(
         raise HTTPException(status_code=400, detail="咨询信息不完整，请检查后重试")
     return {
         "consultation_id": saved.get("id") or saved.get("consultation_id"),
+        "conversation_id": payload.get("conversation_id"),
+        "session_token": payload.get("session_token"),
         "status": saved.get("status") or "PENDING",
         "message": "咨询已提交，我们会尽快联系您",
     }
@@ -674,6 +739,7 @@ def create_transfer_request(
         runtime, "consultation_service", "咨询记录服务未初始化"
     )
     payload = _lead_payload(
+        session_token=body.session_token,
         name=body.name,
         phone=body.phone,
         city=body.city,
@@ -697,6 +763,8 @@ def create_transfer_request(
         raise HTTPException(status_code=400, detail="转人工信息不完整，请检查后重试")
     return {
         "consultation_id": saved.get("id") or saved.get("consultation_id"),
+        "conversation_id": payload.get("conversation_id"),
+        "session_token": payload.get("session_token"),
         "status": saved.get("status") or "PENDING",
         "message": "已收到您的转人工请求，工作人员将尽快与您联系",
     }
@@ -709,8 +777,9 @@ async def law_chat(
 ) -> LawChatPublicResponse:
     runtime = _runtime_for(request)
     orchestrator = _require(runtime, "orchestrator", "法律咨询编排器未初始化")
-    conversation_id = body.conversation_id or body.conv_id or _server_token()
-    user_id = _server_token()
+    conversation_id = body.conversation_id or body.conv_id or str(uuid.uuid4())
+    user_id = derive_user_id(conversation_id)
+    session_token = make_session_token(conversation_id)
     request_id = str(uuid.uuid4())
 
     memory = _get(runtime, "memory")
@@ -901,6 +970,7 @@ async def law_chat(
     return LawChatPublicResponse(
         request_id=resolved_request_id,
         conversation_id=conversation_id,
+        session_token=session_token,
         response=response_text,
         intent=intent_value,
         intent_group=intent_group,
@@ -1204,6 +1274,9 @@ law_router.include_router(admin_router)
 __all__ = [
     "LawChatPublicResponse",
     "LawChatRequest",
+    "derive_user_id",
+    "hash_session_token",
+    "make_session_token",
     "create_law_router",
     "LawConsultationPublicRequest",
     "LawConsultationRequest",
