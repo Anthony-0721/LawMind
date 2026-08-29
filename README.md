@@ -15,3 +15,53 @@ LawMind 是一个面向律所对外咨询场景的多 Agent 智能法律咨询�
 - Docker Compose 一体化部署
 
 文档见 docs/。
+
+## Docker 部署
+
+### 1. 准备环境变量
+
+复制环境变量示例并填写 `ANTHROPIC_API_KEY` 和 `LAWMIND_SESSION_SECRET`：
+
+```bash
+cp .env.law.example .env
+```
+
+生成稳定的会话密钥：
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### 2. 启动
+
+在仓库根目录执行：
+
+```bash
+docker compose up -d --build
+```
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+如需同时清除数据库、Redis 和 ChromaDB 数据卷：
+
+```bash
+docker compose down -v
+```
+
+### 3. 访问地址
+
+| 服务 | 地址 | 默认端口 |
+| --- | --- | --- |
+| 前端 + Nginx | http://localhost/ | 80 |
+| API 健康检查 | http://localhost/health | 80 |
+| API 文档 | http://localhost/docs | 80 |
+| OpenAPI | http://localhost/openapi.json | 80 |
+| PostgreSQL | localhost:5433 | 5433 |
+| Redis | localhost:6379 | 6379 |
+| ChromaDB | http://localhost:8003 | 8003 |
+
+后端 API 和前端服务在 Compose 内部网络运行，宿主机统一通过 80 端口访问。
