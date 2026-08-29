@@ -84,3 +84,4 @@ npm run preview
 
 生产镜像使用 `frontend/Dockerfile` 和 `frontend/nginx.conf`。完整栈部署请使用仓库根目录 `docker-compose.yml`：
 `frontend/docker-compose.yml` 已移除，不再是生产入口。
+
