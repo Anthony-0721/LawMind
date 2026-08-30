@@ -144,13 +144,17 @@ def test_seed_files_exist_and_have_expected_counts_ranges():
     assert lawyers_path.exists()
 
     faq_items = json.loads(faq_path.read_text(encoding="utf-8"))
-    assert 30 <= len(faq_items) <= 50
+    assert 60 <= len(faq_items) <= 100
     for item in faq_items:
         assert item["category"]
         assert item["question"]
         assert item["answer"]
         assert isinstance(item["keywords"], list) and item["keywords"]
         assert item["active"] is True
+    official = [item for item in faq_items if item.get("source") == "official_law"]
+    assert len(official) == 20
+    assert all("【法律依据】" in item["answer"] for item in official)
+    assert all("【核对日期】" in item["answer"] for item in official)
 
     lawyers = json.loads(lawyers_path.read_text(encoding="utf-8"))
     assert 3 <= len(lawyers) <= 5
@@ -289,13 +293,18 @@ def test_no_old_brand_or_real_like_pii_in_backend_seeds():
 def test_loaders_return_law_documents_with_source_and_disclaimer():
     kb_module = _load_knowledge_base_module()
     faq_docs = kb_module.load_law_faq_documents()
-    assert len(faq_docs) == 49
+    assert len(faq_docs) == 69
     for doc in faq_docs:
         assert "问题：" in doc["content"]
         assert "回答：" in doc["content"]
         assert "不构成正式法律意见" in doc["content"]
         assert doc["metadata"]["source"] == "law_firm"
         assert doc["metadata"]["category"]
+    official = [doc for doc in faq_docs if "【法律依据】" in doc["content"]]
+    assert len(official) == 20
+    assert all("【核对日期】" in doc["content"] for doc in official)
+    assert all("【来源】" in doc["content"] for doc in official)
+    assert any("80mg/100ml" in doc["content"] for doc in official)
     combined = "".join(doc["content"] for doc in faq_docs)
     assert "醉驾" in combined
     for old_title in OLD_CUSTOMER_TITLES:

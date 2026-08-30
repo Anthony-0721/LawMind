@@ -15,6 +15,7 @@ LawMind 是面向中国大陆律所对外咨询场景的 Python 多 Agent 智能
 - 客户留资、预约、转人工
 - 咨询记录管理（PostgreSQL）
 - FAQ 管理及 ChromaDB 向量同步
+- 内置 69 条 FAQ，含 20 条经官方来源核对的醉驾、刑事程序及行政处罚法律依据
 - 律所工作人员控制台（管理员密码保护）
 - 内部评测基线、LLM-as-Judge 评分和回归对比
 - 联合 Docker Compose 部署（Nginx + Frontend + API + PostgreSQL + Redis + ChromaDB）
