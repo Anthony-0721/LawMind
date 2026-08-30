@@ -162,6 +162,15 @@ class NoDisclaimerOrchestrator(FakeOrchestrator):
         return result
 
 
+class EscalatedOrchestrator(FakeOrchestrator):
+    """Fake orchestrator that reports a public transfer marker."""
+
+    async def run(self, request: Any) -> Dict[str, Any]:
+        result = await super().run(request)
+        result["escalated"] = True
+        return result
+
+
 class FakeMemory:
     def __init__(self) -> None:
         self.get_context_user_id: Optional[str] = None
@@ -819,6 +828,7 @@ def test_law_chat_uses_whitelisted_response_and_server_token():
         "legal_domain",
         "case_stage",
         "risk_flags",
+        "escalated",
         "missing_facts",
         "recommended_lawyers",
         "consultation_draft_id",
@@ -831,6 +841,7 @@ def test_law_chat_uses_whitelisted_response_and_server_token():
     assert data["intent"] == "dangerous_driving"
     assert data["case_stage"] == "拘留"
     assert data["risk_flags"] == ["detention"]
+    assert data["escalated"] is False
     assert data["missing_facts"] == ["incident_time"]
     assert data["consultation_draft_id"] == "draft-1"
     assert "agent_type" not in data
@@ -911,3 +922,29 @@ def test_admin_login_returns_authenticated(client, monkeypatch):
     response = client.post("/law/admin/login", json={"password": "legacy-secret"})
     assert response.status_code == 200
     assert response.json()["authenticated"] is True
+
+def test_law_chat_exposes_public_escalated_flag_without_internal_fields():
+    app = FastAPI()
+    app.include_router(law_router)
+    memory = FakeMemory()
+    configure_app_law_services(
+        app,
+        orchestrator=EscalatedOrchestrator(),
+        memory=memory,
+    )
+    client = TestClient(app)
+    response = client.post("/law/chat", json={"message": "我要联系律师"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["escalated"] is True
+    assert data["intent"] == "dangerous_driving"
+    for internal_key in (
+        "agent_type",
+        "primary_agent",
+        "supporting_agents",
+        "tools_used",
+        "routing_reason",
+        "entities",
+        "latency_ms",
+    ):
+        assert internal_key not in data

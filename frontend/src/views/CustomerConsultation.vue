@@ -25,6 +25,7 @@ const currentDomain = ref('')
 const caseStage = ref('')
 const missingFacts = ref([])
 const riskFlags = ref([])
+const escalated = ref(false)
 const recommendedLawyers = ref([])
 const lawyerRecommendationReady = ref(false)
 const consultationId = ref('')
@@ -46,7 +47,7 @@ const domainLabel = computed(() => {
   const item = domainTags.value.find((option) => option.value === currentDomain.value)
   return item?.label || currentDomain.value || ''
 })
-const highRisk = computed(() => riskFlags.value.length > 0)
+const highRisk = computed(() => riskFlags.value.length > 0 || escalated.value)
 const riskLabels = {
   detention: '已刑事拘留',
   court_soon: '即将开庭',
@@ -84,6 +85,7 @@ async function sendChat(messageText = draft.value) {
     caseStage.value = data.case_stage || ''
     missingFacts.value = data.missing_facts || []
     riskFlags.value = data.risk_flags || []
+    escalated.value = Boolean(data.escalated)
     recommendedLawyers.value = data.recommended_lawyers || []
     lawyerRecommendationReady.value = true
     messages.value.push({
@@ -289,14 +291,14 @@ onMounted(async () => {
             </div>
           </section>
 
-          <section v-if="caseStage || riskFlags.length" class="card risk-card">
+          <section v-if="caseStage || riskFlags.length || escalated" class="card risk-card">
             <h2>初步风险分析</h2>
             <p v-if="caseStage" class="stage">当前阶段：{{ caseStage }}</p>
             <ul v-if="riskFlags.length" class="risk-list">
               <li v-for="flag in riskFlags" :key="flag">{{ riskLabels[flag] || flag }}</li>
             </ul>
             <p v-if="highRisk" class="risk-warning">
-              以上信息可能涉及紧急或较高风险，请尽快留下联系方式申请人工介入。
+              {{ escalated ? '系统已建议转人工处理，请尽快留下联系方式，工作人员会为您跟进。' : '以上信息可能涉及紧急或较高风险，请尽快留下联系方式申请人工介入。' }}
             </p>
             <p class="muted">以上仅为基于当前信息的初步提示，不构成正式法律意见。</p>
           </section>

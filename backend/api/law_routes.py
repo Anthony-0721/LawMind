@@ -97,6 +97,7 @@ class LawChatPublicResponse(BaseModel):
     legal_domain: str = ""
     case_stage: str = ""
     risk_flags: List[str] = Field(default_factory=list)
+    escalated: bool = False
     missing_facts: List[str] = Field(default_factory=list)
     recommended_lawyers: List[Dict[str, Any]] = Field(default_factory=list)
     consultation_draft_id: Optional[str] = None
@@ -973,6 +974,8 @@ async def law_chat(
     if raw_draft_id not in (None, ""):
         consultation_draft_id = str(raw_draft_id)
 
+    escalated = bool(_value_or_none(result, "escalated", False))
+
     return LawChatPublicResponse(
         request_id=resolved_request_id,
         conversation_id=conversation_id,
@@ -983,6 +986,7 @@ async def law_chat(
         legal_domain=legal_domain,
         case_stage=case_stage,
         risk_flags=risk_values,
+        escalated=escalated,
         missing_facts=missing_facts,
         recommended_lawyers=recommended_lawyers,
         consultation_draft_id=consultation_draft_id,
