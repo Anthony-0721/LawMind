@@ -17,3 +17,5 @@ logs/
 # 数据库
 *.db
 *.sqlite3
+# 本地 Wiki（不推送到远程仓库）
+wiki/

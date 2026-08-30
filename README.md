@@ -4,7 +4,6 @@ LawMind 是面向中国大陆律所对外咨询场景的 Python 多 Agent 智能
 
 > 提示：AI 输出仅为一般性法律信息，不构成正式法律意见，也不替代执业律师对具体案件的判断。
 > 完整架构说明见 [docs/architecture.md](docs/architecture.md)。
-> Wiki：项目定位、技术亮点、业务流程、使用指南、学习文档和面试表达见 [wiki/README.md](wiki/README.md)。
 
 ## 功能
 
@@ -200,6 +199,5 @@ npm run build
 - `backend/`：Python/FastAPI 后端，见 [backend/README.md](backend/README.md)
 - `frontend/`：Vue 3 客户页与工作人员页，见 [frontend/README.md](frontend/README.md)
 - docs/：设计、计划与架构文档
-- wiki/：项目 Wiki、架构图、学习与简历材料
 - `deploy/nginx.conf`：生产 Nginx 配置
 - `docker-compose.yml`：唯一联合部署入口
