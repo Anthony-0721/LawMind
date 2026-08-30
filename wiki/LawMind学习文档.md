@@ -6,7 +6,7 @@ LawMind 是一个面向律所对外咨询的多 Agent 系统。它的重点不�
 
 ```
 普通聊天：用户 -> LLM -> 回答
-LawMind：用户 -> 意图 -> 风险 -> 记忆 -> RAG -> Agent -> 工具 -> 分析 -> 律师/人工 -> 记录
+LawMind：用户 -> 意图 -> 风险 -> 记忆 -> Agent -> 工具/RAG -> 分析 -> 律师/人工 -> 记录
 ```
 
 ## 2. 为什么需要多个 Agent
@@ -42,7 +42,7 @@ EscalationAgent
 2. 系统读取近期记忆
 3. LawIntentRecognizer 识别法律领域
 4. 系统提取实体和风险信号
-5. 按意图决定是否检索知识库
+5. Agent 按需调用 search_law_knowledge（RAG 工具）
 6. AgentOrchestrator 生成 RoutingDecision
 7. 单 Agent 或主辅 Agent 并行执行
 8. 加载对应 Skills
@@ -55,19 +55,26 @@ EscalationAgent
 15. Monitor 统计，Evaluator 评测
 ```
 
-## 4. 为什么先识别领域再检索知识库
+## 4. RAG 如何被调用
 
-如果所有问题都直接检索，会产生大量无关知识。LawMind 的策略是：
+当前实现不是 API 层强制门控。
+
+`search_law_knowledge` 是所有 Agent 的共享工具，模型会根据用户问题和 Agent 的职责自行决定是否调用。识别法律领域主要用于：
+
+- 选择主 Agent / 辅助 Agent
+- 判断是否属于刑事、民事或律所服务
+- 判断是否应该转人工
+
+实际使用中，不同领域的 Agent 通常会检索对应知识：
 
 ```text
-先判断 intent / risk
-  -> 刑事类：检索刑法、刑诉法、醉驾意见
-  -> 民事类：检索劳动争议、合同、交通事故、民间借贷等
-  -> 服务类：检索收费、预约、转人工
-  -> 转人工：直接升级，不做长篇法律分析
+刑事类 Agent：刑法、刑诉法、醉驾意见
+民事类 Agent：劳动争议、合同、交通事故、民间借贷等
+接待类 Agent：收费、预约、转人工
+升级类 Agent：优先转人工，不做长篇法律分析
 ```
 
-这样既降低无效检索，也减少模型被无关内容干扰。
+这种“模型按需调用 RAG”的方式保留了灵活性，但也意味着当前没有严格的“只有刑事/民事才允许检索”的确定性门控。后续可以增加一个 Intent Gate，在路由前决定是否需要注入知识检索工具，进一步减少无效检索。
 
 ## 5. 为什么 Knowledge Base 需要 PostgreSQL
 

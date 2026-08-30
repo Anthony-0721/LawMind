@@ -45,7 +45,7 @@ LawMind 的目标是把这一条链路工程化，而不是只做一个“能说
   -> 读取记忆
   -> 识别法律领域
   -> 提取实体与风险信号
-  -> 判断是否检索知识库
+  -> Agent 按需调用 search_law_knowledge（RAG）
   -> 生成结构化路由决策
   -> 主 Agent / 辅助 Agent / 升级 Agent
   -> Skills 注入
