@@ -713,3 +713,29 @@ def test_unknown_after_generic_domain_clarification_without_exact_fallback_uses_
     assert client.called == 1
     assert result.primary_agent == AgentType.RECEPTION
     assert result.response == "请告诉我您遇到的具体情况和时间点。"
+
+
+def test_unknown_followup_after_domain_answer_uses_reception_agent():
+    client = RepeatedClarificationClient()
+    orchestrator = AgentOrchestrator(
+        api_key="test-key",
+        model="test-model",
+        client=client,
+    )
+    req = Request(
+        message="按这个情况继续",
+        user_id="test-user",
+        conv_id="test-conv",
+        history=[
+            {
+                "role": "assistant",
+                "content": "这是劳动争议咨询。请补充公司名称、工作地点、拖欠工资时间和金额。",
+            }
+        ],
+    )
+
+    result = asyncio.run(orchestrator.run(req))
+
+    assert client.called == 1
+    assert result.primary_agent == AgentType.RECEPTION
+    assert result.response == "请告诉我您遇到的具体情况和时间点。"

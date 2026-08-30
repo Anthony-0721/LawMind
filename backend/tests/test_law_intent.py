@@ -605,3 +605,21 @@ def test_service_capability_questions_are_recognized(message):
     result = make_law_recognizer().recognize_sync(message)
 
     assert result.intent == LawIntent.LAW_FIRM_SERVICE
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_intent"),
+    [
+        ("婚姻家事", LawIntent.MARRIAGE_FAMILY),
+        ("律所服务", LawIntent.LAW_FIRM_SERVICE),
+        ("刑事案件", LawIntent.CRIMINAL_DEFENSE),
+        ("犯罪", LawIntent.CRIMINAL_DEFENSE),
+        ("辞职不给工资", LawIntent.LABOR_DISPUTE),
+        ("不发工资", LawIntent.LABOR_DISPUTE),
+        ("婚姻纠纷", LawIntent.MARRIAGE_FAMILY),
+    ],
+)
+def test_common_domain_labels_and_colloquial_phrases_are_recognized(message, expected_intent):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert result.intent == expected_intent

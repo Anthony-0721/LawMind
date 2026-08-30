@@ -76,13 +76,6 @@ _CLARIFICATION_RESPONSE = (
     "我还不能确定您希望咨询哪个法律领域。请补充是刑事辩护、劳动争议、婚姻家事、合同纠纷、交通事故、民间借贷，还是需要预约律师？"
 )
 
-_CLARIFICATION_MARKERS = (
-    _CLARIFICATION_RESPONSE,
-    "哪个法律领域",
-    "属于哪个领域",
-    "希望咨询哪个领域",
-)
-
 
 def _env_raw(name: str, default: str) -> str:
     """Read current LAWMIND config, then fall back to the legacy deployment env name."""
@@ -1297,14 +1290,18 @@ class AgentOrchestrator:
             scores[AgentType.RECEPTION] += 0.8
 
         criminal_kws = [
-            "醉驾", "酒驾", "危险驾驶", "刑事拘留", "被拘留", "羁押",
-            "刑事辩护", "取保候审", "审查起诉", "开庭", "看守所",
+            "犯罪", "刑事案件", "刑事犯罪", "醉驾", "酒驾", "危险驾驶",
+            "刑事拘留", "被拘留", "羁押", "刑事辩护", "取保候审",
+            "审查起诉", "开庭", "看守所",
         ]
         civil_kws = [
-            "劳动仲裁", "拖欠工资", "离婚", "抚养权", "合同纠纷", "违约",
-            "交通事故", "车祸", "民间借贷", "欠钱", "借条", "债务",
+            "劳动争议", "劳动纠纷", "辞退", "不给工资", "不发工资",
+            "婚姻家事", "婚姻", "婚姻纠纷", "家庭纠纷", "离婚", "抚养权",
+            "合同纠纷", "违约", "交通事故", "车祸",
+            "民间借贷", "欠钱", "欠款", "借条", "债务",
         ]
         reception_kws = [
+            "律所服务", "你能做什么", "能咨询什么", "你们能提供什么法律服务",
             "怎么收费", "收费标准", "律所地址", "咨询流程", "服务流程",
             "代理费", "工作时间", "预约律师", "律师推荐", "转人工",
         ]
@@ -1350,26 +1347,20 @@ class AgentOrchestrator:
         )
 
     @staticmethod
-    def _already_asked_clarification(history: Optional[List[Dict[str, str]]]) -> bool:
-        """Return True when the previous assistant message already asked for the domain."""
-        if not history:
-            return False
+    def _has_assistant_history(history: Optional[List[Dict[str, str]]]) -> bool:
+        """Return True when the conversation already contains an assistant turn."""
         return any(
-            any(
-                str(item.get("content", "") or "").find(marker) >= 0
-                for marker in _CLARIFICATION_MARKERS
-            )
-            for item in history
-            if item.get("role") == "assistant"
+            item.get("role") == "assistant"
+            for item in (history or [])
         )
 
     @staticmethod
     def _needs_clarification(req: Request) -> bool:
         """低置信度且无明确意图时先追问，但高风险条件必须跳过澄清直接升级。
 
-        If the assistant already asked this exact domain question, route the
-        follow-up to ReceptionAgent instead of returning the same hard-coded
-        sentence again.
+        If the assistant has already replied in this conversation, route the
+        follow-up to ReceptionAgent with context instead of returning the same
+        hard-coded sentence again.
         """
         if (
             req.urgency == UrgencyLevel.CRITICAL
@@ -1383,7 +1374,7 @@ class AgentOrchestrator:
         text = (req.message or "").strip()
         if len(text) <= 2:
             return False
-        if AgentOrchestrator._already_asked_clarification(req.history):
+        if AgentOrchestrator._has_assistant_history(req.history):
             return False
         return req.intent_confidence < 0.5
 
