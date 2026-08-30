@@ -615,3 +615,101 @@ def test_failed_escalation_tool_is_not_counted_as_used():
 
     assert "recommend_lawyer" not in result.tools_used
     assert "recommend_lawyer" in [trace["tool_name"] for trace in result.tool_traces]
+
+
+class RepeatedClarificationClient:
+    """Fake LLM client used to prove repeated unknown messages reach ReceptionAgent."""
+
+    def __init__(self):
+        self.called = 0
+
+    @property
+    def messages(self):
+        return self
+
+    async def create(self, **_kwargs):
+        self.called += 1
+        from types import SimpleNamespace
+        return SimpleNamespace(content=[{"type": "text", "text": "请告诉我您遇到的具体情况和时间点。"}])
+
+
+def test_repeated_unknown_message_does_not_repeat_hardcoded_clarification():
+    client = RepeatedClarificationClient()
+    orchestrator = AgentOrchestrator(
+        api_key="test-key",
+        model="test-model",
+        client=client,
+    )
+    req = Request(
+        message="我也不太确定",
+        user_id="test-user",
+        conv_id="test-conv",
+        history=[
+            {
+                "role": "assistant",
+                "content": "我还不能确定您希望咨询哪个法律领域。请补充是刑事辩护、劳动争议、婚姻家事、合同纠纷、交通事故、民间借贷，还是需要预约律师？",
+            }
+        ],
+    )
+
+    result = asyncio.run(orchestrator.run(req))
+
+    assert client.called == 1
+    assert result.primary_agent == AgentType.RECEPTION
+    assert result.response == "请告诉我您遇到的具体情况和时间点。"
+
+
+def test_unknown_after_dynamic_clarification_keeps_using_reception_agent():
+    client = RepeatedClarificationClient()
+    orchestrator = AgentOrchestrator(
+        api_key="test-key",
+        model="test-model",
+        client=client,
+    )
+    req = Request(
+        message="还是不知道",
+        user_id="test-user",
+        conv_id="test-conv",
+        history=[
+            {
+                "role": "assistant",
+                "content": "我还不能确定您希望咨询哪个法律领域。请补充是刑事辩护、劳动争议、婚姻家事、合同纠纷、交通事故、民间借贷，还是需要预约律师？",
+            },
+            {
+                "role": "assistant",
+                "content": "我理解您还不确定这件事属于哪个法律领域。没关系，请先告诉我发生了什么。",
+            },
+        ],
+    )
+
+    result = asyncio.run(orchestrator.run(req))
+
+    assert client.called == 1
+    assert result.primary_agent == AgentType.RECEPTION
+    assert result.response == "请告诉我您遇到的具体情况和时间点。"
+
+
+def test_unknown_after_generic_domain_clarification_without_exact_fallback_uses_reception_agent():
+    client = RepeatedClarificationClient()
+    orchestrator = AgentOrchestrator(
+        api_key="test-key",
+        model="test-model",
+        client=client,
+    )
+    req = Request(
+        message="还是不知道",
+        user_id="test-user",
+        conv_id="test-conv",
+        history=[
+            {
+                "role": "assistant",
+                "content": "我理解您还不确定这件事属于哪个法律领域。没关系，请先告诉我发生了什么。",
+            }
+        ],
+    )
+
+    result = asyncio.run(orchestrator.run(req))
+
+    assert client.called == 1
+    assert result.primary_agent == AgentType.RECEPTION
+    assert result.response == "请告诉我您遇到的具体情况和时间点。"

@@ -72,6 +72,17 @@ class AgentProfile:
 
 _LEGACY_ENV_PREFIX = "RETIRED_"
 
+_CLARIFICATION_RESPONSE = (
+    "我还不能确定您希望咨询哪个法律领域。请补充是刑事辩护、劳动争议、婚姻家事、合同纠纷、交通事故、民间借贷，还是需要预约律师？"
+)
+
+_CLARIFICATION_MARKERS = (
+    _CLARIFICATION_RESPONSE,
+    "哪个法律领域",
+    "属于哪个领域",
+    "希望咨询哪个领域",
+)
+
 
 def _env_raw(name: str, default: str) -> str:
     """Read current LAWMIND config, then fall back to the legacy deployment env name."""
@@ -1094,7 +1105,7 @@ class AgentOrchestrator:
         if self._needs_clarification(req):
             result = OrchestratorResult(
                 request_id=req.request_id,
-                response="我还不能确定您希望咨询哪个法律领域。请补充是刑事辩护、劳动争议、婚姻家事、合同纠纷、交通事故、民间借贷，还是需要预约律师？",
+                response=_CLARIFICATION_RESPONSE,
                 agent_type=AgentType.RECEPTION,
                 intent=req.intent,
                 escalated=False,
@@ -1339,8 +1350,27 @@ class AgentOrchestrator:
         )
 
     @staticmethod
+    def _already_asked_clarification(history: Optional[List[Dict[str, str]]]) -> bool:
+        """Return True when the previous assistant message already asked for the domain."""
+        if not history:
+            return False
+        return any(
+            any(
+                str(item.get("content", "") or "").find(marker) >= 0
+                for marker in _CLARIFICATION_MARKERS
+            )
+            for item in history
+            if item.get("role") == "assistant"
+        )
+
+    @staticmethod
     def _needs_clarification(req: Request) -> bool:
-        """低置信度且无明确意图时先追问，但高风险条件必须跳过澄清直接升级。"""
+        """低置信度且无明确意图时先追问，但高风险条件必须跳过澄清直接升级。
+
+        If the assistant already asked this exact domain question, route the
+        follow-up to ReceptionAgent instead of returning the same hard-coded
+        sentence again.
+        """
         if (
             req.urgency == UrgencyLevel.CRITICAL
             or LawRiskFlag.DETENTION in req.risk_flags
@@ -1352,6 +1382,8 @@ class AgentOrchestrator:
             return False
         text = (req.message or "").strip()
         if len(text) <= 2:
+            return False
+        if AgentOrchestrator._already_asked_clarification(req.history):
             return False
         return req.intent_confidence < 0.5
 
