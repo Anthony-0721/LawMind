@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620">
+  <defs>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .title { font: 800 28px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #16233d; }
+      .sub { font: 400 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #66738a; }
+      .box { fill: #fff; stroke: #cfd8e8; stroke-width: 1.5; rx: 14; }
+      .blue { fill: #e8f1ff; stroke: #6aa0ff; }
+      .green { fill: #eaf8f0; stroke: #55bd7f; }
+      .orange { fill: #fff3e3; stroke: #f2a33a; }
+      .purple { fill: #f1ecff; stroke: #9b7cf4; }
+      .label { font: 700 16px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #20304a; }
+      .small { font: 400 12px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #60708a; }
+      .arrow { stroke: #7b8aa3; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8aa3"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1000" height="620"/>
+<text class="title" x="40" y="52">LawMind Agent 与 Skills 注入</text><text class="sub" x="40" y="78">4 类 Agent 由共享编排器路由，并由各自 Skill 约束</text>
+<rect class="blue" x="360" y="110" width="280" height="60" rx="14"/><text class="label" x="500.0" y="142" text-anchor="middle">AgentOrchestrator</text><text class="small" x="500.0" y="165" text-anchor="middle">结构化路由</text><path class="arrow" d="M410 170 L170 220"/><rect class="green" x="80" y="225" width="180" height="60" rx="14"/><text class="label" x="170.0" y="257" text-anchor="middle">ReceptionAgent</text><text class="small" x="170.0" y="280" text-anchor="middle">接待 / 律所服务</text><path class="arrow" d="M470 170 L370 220"/><rect class="orange" x="280" y="225" width="180" height="60" rx="14"/><text class="label" x="370.0" y="257" text-anchor="middle">CriminalDefenseAgent</text><text class="small" x="370.0" y="280" text-anchor="middle">刑事 / 醉驾</text><path class="arrow" d="M530 170 L570 220"/><rect class="purple" x="480" y="225" width="180" height="60" rx="14"/><text class="label" x="570.0" y="257" text-anchor="middle">CivilConsultationAgent</text><text class="small" x="570.0" y="280" text-anchor="middle">民事领域</text><path class="arrow" d="M590 170 L780 220"/><rect class="blue" x="690" y="225" width="180" height="60" rx="14"/><text class="label" x="780.0" y="257" text-anchor="middle">EscalationAgent</text><text class="small" x="780.0" y="280" text-anchor="middle">转人工 / 留资</text><rect class="green" x="80" y="360" width="180" height="70" rx="14"/><text class="label" x="170.0" y="392" text-anchor="middle">前台接待 Skill</text><text class="small" x="170.0" y="415" text-anchor="middle">front_desk_reception</text><rect class="orange" x="280" y="360" width="180" height="70" rx="14"/><text class="label" x="370.0" y="392" text-anchor="middle">刑事咨询 Skill</text><text class="small" x="370.0" y="415" text-anchor="middle">criminal_consultation</text><rect class="purple" x="480" y="360" width="180" height="70" rx="14"/><text class="label" x="570.0" y="392" text-anchor="middle">民事咨询 Skill</text><text class="small" x="570.0" y="415" text-anchor="middle">civil_consultation</text><rect class="blue" x="690" y="360" width="180" height="70" rx="14"/><text class="label" x="780.0" y="392" text-anchor="middle">转人工 Skill</text><text class="small" x="780.0" y="415" text-anchor="middle">escalation_and_intake</text><path class="arrow" d="M170 360 L170 285"/><path class="arrow" d="M370 360 L370 285"/><path class="arrow" d="M570 360 L570 285"/><path class="arrow" d="M780 360 L780 285"/>
+</svg>

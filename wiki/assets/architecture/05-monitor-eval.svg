@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620">
+  <defs>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .title { font: 800 28px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #16233d; }
+      .sub { font: 400 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #66738a; }
+      .box { fill: #fff; stroke: #cfd8e8; stroke-width: 1.5; rx: 14; }
+      .blue { fill: #e8f1ff; stroke: #6aa0ff; }
+      .green { fill: #eaf8f0; stroke: #55bd7f; }
+      .orange { fill: #fff3e3; stroke: #f2a33a; }
+      .purple { fill: #f1ecff; stroke: #9b7cf4; }
+      .label { font: 700 16px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #20304a; }
+      .small { font: 400 12px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #60708a; }
+      .arrow { stroke: #7b8aa3; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8aa3"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1000" height="620"/>
+<text class="title" x="40" y="52">LawMind 监控与评测闭环</text><text class="sub" x="40" y="78">在线监控影响路由，LLM-as-Judge 检测回复质量回归</text>
+<rect class="blue" x="80" y="140" width="250" height="70" rx="14"/><text class="label" x="205.0" y="172" text-anchor="middle">对话请求</text><text class="small" x="205.0" y="195" text-anchor="middle">Agent 执行</text><path class="arrow" d="M330 175 L410 175"/><rect class="orange" x="420" y="140" width="250" height="70" rx="14"/><text class="label" x="545.0" y="172" text-anchor="middle">Monitor</text><text class="small" x="545.0" y="195" text-anchor="middle">成功率 / 延迟 / 工具</text><path class="arrow" d="M670 175 L750 175"/><rect class="green" x="760" y="140" width="180" height="70" rx="14"/><text class="label" x="850.0" y="172" text-anchor="middle">routing_score</text><text class="small" x="850.0" y="195" text-anchor="middle">monitor_penalty</text><path class="arrow" d="M690 360 L500 360"/><rect class="purple" x="80" y="350" width="250" height="70" rx="14"/><text class="label" x="205.0" y="382" text-anchor="middle">评测请求</text><text class="small" x="205.0" y="405" text-anchor="middle">POST /eval/run</text><rect class="green" x="420" y="350" width="250" height="70" rx="14"/><text class="label" x="545.0" y="382" text-anchor="middle">LLM-as-Judge</text><text class="small" x="545.0" y="405" text-anchor="middle">相关性 / 准确性 / 完整性 / 有用性</text><rect class="blue" x="760" y="350" width="180" height="70" rx="14"/><text class="label" x="850.0" y="382" text-anchor="middle">回归报告</text><text class="small" x="850.0" y="405" text-anchor="middle">通过率 / 建议</text><path class="arrow" d="M330 385 L420 385"/><path class="arrow" d="M670 385 L760 385"/><rect class="blue" x="80" y="490" width="250" height="70" rx="14"/><text class="label" x="205.0" y="522" text-anchor="middle">归档基线</text><text class="small" x="205.0" y="545" text-anchor="middle">law_baseline.json</text><path class="arrow" d="M330 525 L420 525"/><rect class="green" x="420" y="490" width="250" height="70" rx="14"/><text class="label" x="545.0" y="522" text-anchor="middle">运行时基线</text><text class="small" x="545.0" y="545" text-anchor="middle">runtime_law_baseline.json</text>
+</svg>

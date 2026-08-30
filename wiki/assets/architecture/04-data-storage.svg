@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620">
+  <defs>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .title { font: 800 28px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #16233d; }
+      .sub { font: 400 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #66738a; }
+      .box { fill: #fff; stroke: #cfd8e8; stroke-width: 1.5; rx: 14; }
+      .blue { fill: #e8f1ff; stroke: #6aa0ff; }
+      .green { fill: #eaf8f0; stroke: #55bd7f; }
+      .orange { fill: #fff3e3; stroke: #f2a33a; }
+      .purple { fill: #f1ecff; stroke: #9b7cf4; }
+      .label { font: 700 16px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #20304a; }
+      .small { font: 400 12px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #60708a; }
+      .arrow { stroke: #7b8aa3; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8aa3"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1000" height="620"/>
+<text class="title" x="40" y="52">LawMind 数据与存储</text><text class="sub" x="40" y="78">PostgreSQL 事实源 + Redis 工作记忆 + ChromaDB 检索/长期记忆</text>
+<rect class="green" x="60" y="130" width="240" height="80" rx="14"/><text class="label" x="180.0" y="162" text-anchor="middle">PostgreSQL</text><text class="small" x="180.0" y="185" text-anchor="middle">consultations / lawyers / law_faq</text><rect class="orange" x="380" y="130" width="240" height="80" rx="14"/><text class="label" x="500.0" y="162" text-anchor="middle">Redis</text><text class="small" x="500.0" y="185" text-anchor="middle">工作记忆 / 会话摘要</text><rect class="purple" x="700" y="130" width="240" height="80" rx="14"/><text class="label" x="820.0" y="162" text-anchor="middle">ChromaDB</text><text class="small" x="820.0" y="185" text-anchor="middle">law_knowledge_base / episodic / user_profile</text><rect class="blue" x="60" y="280" width="240" height="80" rx="14"/><text class="label" x="180.0" y="312" text-anchor="middle">FaqSyncService</text><text class="small" x="180.0" y="335" text-anchor="middle">FAQ -> ChromaDB</text><rect class="blue" x="380" y="280" width="240" height="80" rx="14"/><text class="label" x="500.0" y="312" text-anchor="middle">KnowledgeBase</text><text class="small" x="500.0" y="335" text-anchor="middle">语义检索</text><rect class="green" x="700" y="280" width="240" height="80" rx="14"/><text class="label" x="820.0" y="312" text-anchor="middle">Skills</text><text class="small" x="820.0" y="335" text-anchor="middle">4 个律所规则</text><path class="arrow" d="M180 210 L180 280"/><path class="arrow" d="M500 210 L500 280"/><path class="arrow" d="M820 210 L820 280"/><rect class="blue" x="60" y="430" width="240" height="80" rx="14"/><text class="label" x="180.0" y="462" text-anchor="middle">law_faq_seed.json</text><text class="small" x="180.0" y="485" text-anchor="middle">69 条 FAQ / 20 条法条</text><rect class="blue" x="380" y="430" width="240" height="80" rx="14"/><text class="label" x="500.0" y="462" text-anchor="middle">law_domain_briefs</text><text class="small" x="500.0" y="485" text-anchor="middle">8 份领域摘要</text><rect class="purple" x="700" y="430" width="240" height="80" rx="14"/><text class="label" x="820.0" y="462" text-anchor="middle">law_baseline.json</text><text class="small" x="820.0" y="485" text-anchor="middle">评测基线</text>
+</svg>

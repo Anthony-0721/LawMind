@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620">
+  <defs>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .title { font: 800 28px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #16233d; }
+      .sub { font: 400 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #66738a; }
+      .box { fill: #fff; stroke: #cfd8e8; stroke-width: 1.5; rx: 14; }
+      .blue { fill: #e8f1ff; stroke: #6aa0ff; }
+      .green { fill: #eaf8f0; stroke: #55bd7f; }
+      .orange { fill: #fff3e3; stroke: #f2a33a; }
+      .purple { fill: #f1ecff; stroke: #9b7cf4; }
+      .label { font: 700 16px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #20304a; }
+      .small { font: 400 12px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #60708a; }
+      .arrow { stroke: #7b8aa3; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8aa3"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1000" height="620"/>
+<text class="title" x="40" y="52">LawMind /api/law/chat 主链路</text><text class="sub" x="40" y="78">一个法律咨询请求从识别到返回的完整路径</text>
+<rect class="green" x="350" y="105" width="300" height="50" rx="14"/><text class="label" x="500.0" y="137" text-anchor="middle">用户消息</text><text class="small" x="500.0" y="160" text-anchor="middle">POST /api/law/chat</text><path class="arrow" d="M500 155 L500 185"/><rect class="blue" x="350" y="190" width="300" height="50" rx="14"/><text class="label" x="500.0" y="222" text-anchor="middle">读取记忆</text><text class="small" x="500.0" y="245" text-anchor="middle">Redis / ChromaDB</text><path class="arrow" d="M500 240 L500 270"/><rect class="blue" x="350" y="275" width="300" height="50" rx="14"/><text class="label" x="500.0" y="307" text-anchor="middle">法律意图 / 风险识别</text><text class="small" x="500.0" y="330" text-anchor="middle">intent / entities / risk_flags</text><path class="arrow" d="M500 325 L500 355"/><rect class="purple" x="350" y="360" width="300" height="50" rx="14"/><text class="label" x="500.0" y="392" text-anchor="middle">知识检索</text><text class="small" x="500.0" y="415" text-anchor="middle">law_knowledge_base</text><path class="arrow" d="M500 410 L500 440"/><rect class="orange" x="350" y="445" width="300" height="50" rx="14"/><text class="label" x="500.0" y="477" text-anchor="middle">Agent 路由</text><text class="small" x="500.0" y="500" text-anchor="middle">Reception / Criminal / Civil / Escalation</text><path class="arrow" d="M500 495 L500 525"/><rect class="green" x="350" y="530" width="300" height="50" rx="14"/><text class="label" x="500.0" y="562" text-anchor="middle">返回白名单响应</text><text class="small" x="500.0" y="585" text-anchor="middle">escalated / risk_flags / lawyers / disclaimer</text>
+</svg>
