@@ -90,6 +90,9 @@ LAW_TEMPLATES: Dict[LawIntent, List[str]] = {
         "移送检察院",
     ],
     LawIntent.LABOR_DISPUTE: [
+        "劳动争议",
+        "劳动纠纷",
+        "劳动合同纠纷",
         "劳动仲裁",
         "拖欠工资",
         "违法解除",
@@ -136,6 +139,9 @@ LAW_TEMPLATES: Dict[LawIntent, List[str]] = {
         "律师推荐",
     ],
     LawIntent.LAW_FIRM_SERVICE: [
+        "你能做什么",
+        "能咨询什么",
+        "你们能提供什么法律服务",
         "怎么收费",
         "咨询流程",
         "律所地址",
@@ -176,6 +182,9 @@ LAW_PATTERNS: Dict[LawIntent, List[str]] = {
         "开庭",
     ],
     LawIntent.LABOR_DISPUTE: [
+        "劳动争议",
+        "劳动纠纷",
+        "劳动合同纠纷",
         "劳动仲裁",
         "拖欠工资",
         "违法解除",
@@ -229,6 +238,9 @@ LAW_PATTERNS: Dict[LawIntent, List[str]] = {
         "律师推荐",
     ],
     LawIntent.LAW_FIRM_SERVICE: [
+        "你能做什么",
+        "能咨询什么",
+        "你们能提供什么法律服务",
         "怎么收费",
         "咨询流程",
         "律所地址",

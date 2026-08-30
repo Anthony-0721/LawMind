@@ -577,3 +577,31 @@ def test_common_drunk_driving_colloquial_phrases_are_recognized(message):
     result = make_law_recognizer().recognize_sync(message)
 
     assert result.intent == LawIntent.DANGEROUS_DRIVING
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "劳动争议",
+        "劳动纠纷",
+        "劳动合同纠纷",
+    ],
+)
+def test_common_labor_dispute_phrases_are_recognized(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert result.intent == LawIntent.LABOR_DISPUTE
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "你好，你能做什么",
+        "你们能提供什么法律服务",
+        "你能咨询什么",
+    ],
+)
+def test_service_capability_questions_are_recognized(message):
+    result = make_law_recognizer().recognize_sync(message)
+
+    assert result.intent == LawIntent.LAW_FIRM_SERVICE
