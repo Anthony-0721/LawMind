@@ -544,7 +544,7 @@ class LawIntentRecognizer:
     rule-based so escalation decisions stay deterministic and auditable.
     """
 
-    DEFAULT_WEIGHTS = {"pattern": 0.35, "llm": 0.45, "embedding": 0.20}
+    DEFAULT_WEIGHTS = {"pattern": 0.1, "llm": 0.7, "embedding": 0.2}
 
     def __init__(
         self,
