@@ -977,7 +977,13 @@ class AgentOrchestrator:
                 kwargs["base_url"] = base_url
             client = AsyncAnthropic(**kwargs)
 
-        self._intent_recognizer = LawIntentRecognizer(api_key=api_key, model=model)
+        self._intent_recognizer = LawIntentRecognizer(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            use_llm=True,
+            use_embedding=True,
+        )
         self._skill_manager = skill_manager
         self._composer = ResponseComposer(client, model, skill_manager)
         self._shared_tools: Dict[str, AgentToolSpec] = {}

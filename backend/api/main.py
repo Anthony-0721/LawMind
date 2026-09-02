@@ -114,6 +114,9 @@ async def lifespan(app: FastAPI):
     recognizer = LawIntentRecognizer(
         api_key=cfg["api_key"],
         model=cfg["model"],
+        base_url=cfg.get("base_url"),
+        use_llm=True,
+        use_embedding=True,
     )
 
     # Skills：启动时从目录加载业务能力说明，并在 Agent 调用 LLM 时动态注入。

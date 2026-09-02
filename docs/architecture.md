@@ -88,7 +88,7 @@ sequenceDiagram
 | 组件 | 职责 |
 | --- | --- |
 | `core/law_domain.py` | 法律领域、实体、风险规则 |
-| `core/intent_recognizer.py` | LawIntentRecognizer：规则 + 本地向量 + LLM 兜底 |
+| `core/intent_recognizer.py` | LawIntentRecognizer：规则锚点 + LLM 语义 + 本地向量相似度的三源融合 |
 | `agents/agent_orchestrator.py` | 接待/刑事/民事/升级 Agent 路由、并行、升级 |
 | `agents/tools.py` | 知识搜索、缺失事实、咨询记录、律师推荐、交接工具 |
 | `memory/` | Redis 近期消息 + ChromaDB 用户/案件记忆 |
@@ -100,6 +100,7 @@ sequenceDiagram
 
 ## 数据与搜索
 
+- 意图识别默认在存在有效模型配置时启用「LLM 语义 + 本地 n-gram 向量相似度 + 规则锚点」三源融合；无有效配置时自动回退纯规则，保证可测试与确定性。
 - PostgreSQL 是咨询、律师、FAQ 的事实源。
 - FAQ 修改后由 `faq_sync_service` 同步到 ChromaDB；旧向量先删除，避免残留。
 - ChromaDB 只保存 `law_knowledge_base` 集合，包含领域摘要和 FAQ 向量，不按 Agent 拆分。
