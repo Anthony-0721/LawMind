@@ -83,6 +83,7 @@ class EvalReport:
     regressions:      List[str]          # 相比基线退化的指标
     recommendations:  List[str]
     results:          List[EvalResult]
+    judge_failures:   int = 0            # 判分器故障次数（已排除出 pass_rate）
 
 
 # ── LLM-as-Judge ─────────────────────────────────────────────────────────────
@@ -300,7 +301,10 @@ class EndToEndEvaluator:
             for i, case in enumerate(dialog_cases):
                 case_results = await self._evaluate_dialog_case(case, i)
                 results.extend(case_results)
+                # 判分器故障时四维分是兜底 0.5，不能进平均值，否则质量分与回归检测一起失真。
                 for r in case_results:
+                    if r.metadata.get("judge_failed"):
+                        continue
                     for k in all_scores:
                         if k in r.scores:
                             all_scores[k].append(r.scores[k])
@@ -312,8 +316,11 @@ class EndToEndEvaluator:
         if intent_metrics:
             avg_scores["intent_accuracy"] = intent_metrics["accuracy"]
 
-        passed_count = sum(1 for r in results if r.passed)
-        pass_rate    = passed_count / len(results) if results else 0.0
+        # 判分器故障的结果不计入 pass_rate，单独统计，避免把“未评测”记成“未通过”。
+        evaluated = [r for r in results if not r.metadata.get("judge_failed")]
+        passed_count = sum(1 for r in evaluated if r.passed)
+        pass_rate    = passed_count / len(evaluated) if evaluated else 0.0
+        judge_failures = len(results) - len(evaluated)
 
         # 4. 回归检测
         regressions = self._detect_regressions(avg_scores)
@@ -330,6 +337,7 @@ class EndToEndEvaluator:
             regressions=regressions,
             recommendations=recommendations,
             results=results,
+            judge_failures=judge_failures,
         )
         self._history.append(report)
         self._save_baseline(report)
@@ -377,7 +385,11 @@ class EndToEndEvaluator:
                     "helpfulness": scores.helpfulness,
                     "overall": scores.overall,
                 },
-                detail=f"Q: {question[:30]}... → 综合评分 {scores.overall:.3f}",
+                detail=(
+                    f"Q: {question[:30]}... → 判分器故障，未评测"
+                    if scores.judge_failed
+                    else f"Q: {question[:30]}... → 综合评分 {scores.overall:.3f}"
+                ),
                 metadata={
                     "question": question,
                     "response": actual_answer,
@@ -493,6 +505,7 @@ class EndToEndEvaluator:
             avg_scores=dict(data.get("avg_scores", {})),
             regressions=list(data.get("regressions", [])),
             recommendations=list(data.get("recommendations", [])),
+            judge_failures=int(data.get("judge_failures", 0)),
             results=[
                 EvalResult(
                     test_id=r.get("test_id", ""),

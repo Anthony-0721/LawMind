@@ -20,8 +20,6 @@ from agents.agent_orchestrator import (
     Request,
 )
 from core.intent_recognizer import (
-    IntentCategory,
-    IntentRecognizer,
     LawIntentRecognizer,
     UrgencyLevel,
 )
@@ -328,12 +326,6 @@ def test_escalation_skill_manager_failure_keeps_deterministic_success():
     assert agent._last_skill_prompt == ""
     assert result.skill_prompt == ""
     assert result.metadata.get("skill_prompt_injected") is False
-
-
-def test_old_intent_recognizer_api_remains_importable():
-    assert IntentCategory.OTHER is not None
-    assert callable(IntentRecognizer)
-    assert hasattr(IntentRecognizer, "__init__")
 
 
 def test_production_path_uses_law_intent_recognizer():

@@ -254,3 +254,45 @@ def test_save_refuses_to_overwrite_shipped_baseline(monkeypatch):
     ]))
 
     assert writes == []
+
+
+class FailingJudgeClient:
+    """LLM-as-judge client that always fails, to exercise P3-G handling."""
+
+    def __init__(self):
+        self.calls = 0
+
+    @property
+    def messages(self):
+        return self
+
+    async def create(self, **_kwargs):
+        self.calls += 1
+        raise RuntimeError("judge unavailable")
+
+
+def test_p3g_judge_failure_excluded_from_pass_rate_and_flagged():
+    evaluator = EndToEndEvaluator(
+        orchestrator=FakeEvaluatorOrchestrator(),
+        recognizer=make_recognizer(),
+        api_key="test-key",
+        model="test-model",
+        client=FailingJudgeClient(),
+    )
+    report = asyncio.run(evaluator.run(
+        intent_cases=[IntentTestCase("醉驾被查了会怎么样？", "dangerous_driving")],
+        dialog_cases=[{"question": "醉驾被查了会怎么样？"}],
+    ))
+    # intent result evaluated+passes; dialog judge failed → excluded from pass_rate
+    assert report.judge_failures == 1
+    assert report.passed == 1
+    assert report.pass_rate == 1.0
+    dialog = [r for r in report.results if r.test_id.startswith("dialog")][0]
+    assert dialog.metadata.get("judge_failed") is True
+    assert "未评测" in dialog.detail
+
+    # 四维质量分同样不得包含兜底 0.5，否则回归检测会被判分器故障污染。
+    assert report.avg_scores.get("relevance") is None
+    assert report.avg_scores.get("accuracy") is None
+    assert report.avg_scores.get("completeness") is None
+    assert report.avg_scores.get("helpfulness") is None

@@ -536,14 +536,45 @@ def has_unnegated_keyword(text: str, keyword: str) -> bool:
     return False
 
 
+# Non-lawyer 请-continuations: bare 没有请/尚未请 at a comma boundary followed
+# by one of these is a false positive (the 请 verb is unrelated to hiring a lawyer).
+_NON_LAWYER_INVITE_CONTINUATIONS = ("请假", "请别人", "请同事", "请病假", "请客")
+
+
+def _bare_invite_false_positive(text: str, match_start: int, match_end: int) -> bool:
+    """Bare invite (没有请/没请/未请/尚未请) at a clause boundary, followed in
+    the next clause by a non-lawyer 请-phrase → suppress as a false positive.
+
+    Explicit NO_LAWYER_PHRASES (e.g. 没有请律师) are never suppressed; only the
+    ambiguous bare invite that matched via the clause-end (\\s*$) branch is.
+    """
+    matched = text[match_start:match_end]
+    if matched in NO_LAWYER_PHRASES:
+        return False  # explicit phrase is a real signal
+    spans = _clause_spans(text)
+    for i, (s, e) in enumerate(spans):
+        if not (s <= match_start < e):
+            continue
+        tail = text[match_end:e]
+        if re.search(r"律师|代理人|委托|聘请", tail):
+            return False  # a lawyer-related word follows in the same clause
+        if i + 1 < len(spans):
+            ns, ne = spans[i + 1]
+            return text[ns:ne].startswith(_NON_LAWYER_INVITE_CONTINUATIONS)
+        return False  # bare at sentence end, no continuation → real no-lawyer
+    return False
+
+
 def has_no_lawyer_risk(text: str) -> bool:
     """Detect NO_LAWYER with clause boundaries, double negation and positive override."""
     clauses = _clauses(text)
     if any(_POSITIVE_LAWYER_RE.search(clause) for clause in clauses):
         return False
-    for start, _ in _no_lawyer_matches(text):
+    for start, end in _no_lawyer_matches(text):
         clause = _clause_text_at(text, start)
         if _is_double_negated_no_lawyer_clause(clause):
+            continue
+        if _bare_invite_false_positive(text, start, end):
             continue
         return True
     return False

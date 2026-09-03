@@ -623,3 +623,32 @@ def test_common_domain_labels_and_colloquial_phrases_are_recognized(message, exp
     result = make_law_recognizer().recognize_sync(message)
 
     assert result.intent == expected_intent
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "没有请，请假",
+        "尚未请，请假",
+        "我没有请，请别人",
+    ],
+)
+def test_p2d_no_lawyer_cross_clause_false_positive_suppressed(message):
+    """Bare 没有请/尚未请 at a comma boundary followed by a non-lawyer
+    请-phrase (请假/请别人) must not be flagged as NO_LAWYER."""
+    result = make_law_recognizer().recognize_sync(message)
+    assert LawRiskFlag.NO_LAWYER not in result.risk_flags, message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "没有请律师，请假",
+        "尚未请律师，请假",
+    ],
+)
+def test_p2d_explicit_no_lawyer_phrase_still_detected_with_followup(message):
+    """Explicit 没有/尚未请律师 stays a real NO_LAWYER signal even when a
+    non-lawyer 请-phrase follows in the next clause."""
+    result = make_law_recognizer().recognize_sync(message)
+    assert LawRiskFlag.NO_LAWYER in result.risk_flags, message

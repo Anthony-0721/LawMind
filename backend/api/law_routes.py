@@ -103,27 +103,6 @@ class LawChatPublicResponse(BaseModel):
     consultation_draft_id: Optional[str] = None
 
 
-class LawConsultationRequest(BaseModel):
-    """Backward-compatible alias; the public endpoint uses the strict model."""
-
-    model_config = ConfigDict(extra="allow")
-
-    request_id: Optional[str] = None
-    user_id: str = "anonymous"
-    contact_name: Optional[str] = None
-    contact_phone: Optional[str] = None
-    name: Optional[str] = None
-    phone: Optional[str] = None
-    contact: Optional[Dict[str, Any]] = None
-    city: str = ""
-    preferred_time: str = ""
-    consent: Any = None
-    legal_domain: str = ""
-    case_stage: str = ""
-    risk_flags: List[str] = Field(default_factory=list)
-    facts: Dict[str, Any] = Field(default_factory=dict)
-
-
 def _validate_public_consent(value: Any) -> Any:
     if isinstance(value, bool):
         if value is not True:
@@ -940,6 +919,10 @@ async def law_chat(
         except Exception:
             missing_facts = []
 
+    # Lead receipts are intentionally handled only by /consultations and /transfer,
+    # so /chat never returns a consultation_draft_id in production. The lookup below
+    # is kept only for dict-shaped results (fakes, TypeError-fallback run path);
+    # OrchestratorResult deliberately carries no consultation_draft field.
     consultation_draft = _value_or_none(result, "consultation_draft")
     if not isinstance(consultation_draft, Mapping):
         consultation_draft = _value_or_none(result, "draft")
@@ -1291,7 +1274,6 @@ __all__ = [
     "make_session_token",
     "create_law_router",
     "LawConsultationPublicRequest",
-    "LawConsultationRequest",
     "LawRuntime",
     "admin_router",
     "configure_app_law_services",
