@@ -100,8 +100,31 @@ OLD_CUSTOMER_TITLES = (
     "配送说明",
 )
 
-OLD_BRAND_PATTERN = re.compile("retired" + "brand", re.IGNORECASE)
-LEGACY_ENV_PREFIX = "RETIRED_"
+# Sentinel prefix that must never be honoured: config lives under LAWMIND_ only.
+RETIRED_ENV_PREFIX = "RETIRED_"
+
+# Non-LAWMIND_ environment names legitimately read by production code (third-party
+# SDK conventions, infra wiring, and the retained admin-password alias).
+ALLOWED_FOREIGN_ENV_VARS = {
+    "ALERT_WEBHOOK_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "API_HOST",
+    "API_PORT",
+    "APP_ENV",
+    "CHROMA_HOST",
+    "CHROMA_PERSIST_DIRECTORY",
+    "CHROMA_PORT",
+    "DATABASE_URL",
+    "EVAL_BASELINE_PATH",
+    "EVAL_SHIPPED_BASELINE_PATH",
+    "LAW_FIRM_ADMIN_PASSWORD",
+    "LOG_LEVEL",
+    "MONITOR_INTERVAL",
+    "PROMETHEUS_PORT",
+    "REDIS_URL",
+}
 
 
 def _parse_front_matter(text: str):
@@ -228,7 +251,7 @@ def test_per_agent_model_env_ignores_legacy_prefix(monkeypatch):
 
     primary = "LAWMIND_CRIMINAL_MODEL"
     monkeypatch.setenv(primary, "lawmind-criminal-model")
-    monkeypatch.setenv(LEGACY_ENV_PREFIX + "CRIMINAL_MODEL", "legacy-criminal-model")
+    monkeypatch.setenv(RETIRED_ENV_PREFIX + "CRIMINAL_MODEL", "legacy-criminal-model")
     agent = AgentOrchestrator._make_agent(
         CriminalDefenseAgent, None, "default-model", None
     )
@@ -247,7 +270,7 @@ def test_api_env_readers_ignore_legacy_prefix(monkeypatch):
 
     primary = "LAWMIND_SKILLS_DIR"
     monkeypatch.setenv(primary, "/primary/skills")
-    monkeypatch.setenv(LEGACY_ENV_PREFIX + "SKILLS_DIR", "/legacy/skills")
+    monkeypatch.setenv(RETIRED_ENV_PREFIX + "SKILLS_DIR", "/legacy/skills")
     assert api_main._env_str(primary, "/default") == "/primary/skills"
 
     monkeypatch.delenv(primary)
@@ -255,7 +278,7 @@ def test_api_env_readers_ignore_legacy_prefix(monkeypatch):
 
     primary_int = "LAWMIND_SKILLS_MAX_PROMPT_CHARS"
     monkeypatch.setenv(primary_int, "9000")
-    monkeypatch.setenv(LEGACY_ENV_PREFIX + "SKILLS_MAX_PROMPT_CHARS", "7000")
+    monkeypatch.setenv(RETIRED_ENV_PREFIX + "SKILLS_MAX_PROMPT_CHARS", "7000")
     assert api_main._env_int(primary_int, 5000) == 9000
 
     monkeypatch.setenv(primary_int, "not-a-number")
@@ -267,19 +290,28 @@ def test_orchestrator_env_reader_ignores_legacy_prefix(monkeypatch):
 
     primary = "LAWMIND_TOOL_TRACE_MAX"
     monkeypatch.setenv(primary, "777")
-    monkeypatch.setenv(LEGACY_ENV_PREFIX + "TOOL_TRACE_MAX", "321")
+    monkeypatch.setenv(RETIRED_ENV_PREFIX + "TOOL_TRACE_MAX", "321")
     assert _env_int(primary, 200) == 777
 
     monkeypatch.delenv(primary)
     assert _env_int(primary, 200) == 200
 
 
-def test_no_old_brand_or_real_like_pii_in_backend_seeds():
-    for path in BACKEND_ROOT.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in {".py", ".json", ".md", ".yml", ".yaml", ".txt", ".env", ".example"}:
+def test_production_config_is_lawmind_scoped_and_seeds_are_pii_free():
+    # Every literal environment name read by production code must be LAWMIND_-scoped
+    # or a registered infrastructure name. This blocks reintroducing an alternate-prefix
+    # config fallback without having to name any specific legacy prefix.
+    get_env_literal = re.compile(r'os\.getenv\("([A-Za-z_][A-Za-z0-9_]*)"')
+    offenders = []
+    for path in sorted(BACKEND_ROOT.rglob("*.py")):
+        if "tests" in path.parts:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        assert not OLD_BRAND_PATTERN.search(text), path
+        for name in get_env_literal.findall(text):
+            if name.startswith("LAWMIND_") or name in ALLOWED_FOREIGN_ENV_VARS:
+                continue
+            offenders.append("%s: %s" % (path.name, name))
+    assert not offenders, offenders
 
     faq_text = (DATA_DIR / "law_faq_seed.json").read_text(encoding="utf-8")
     lawyer_text = (DATA_DIR / "lawyers_seed.json").read_text(encoding="utf-8")
