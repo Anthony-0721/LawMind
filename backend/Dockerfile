@@ -25,14 +25,16 @@ COPY --from=dependencies /usr/local/lib/python3.12/site-packages /usr/local/lib/
 COPY --from=dependencies /usr/local/bin /usr/local/bin
 COPY --chown=lawmind:lawmind . .
 
-RUN mkdir -p /app/data/chroma /app/logs \
-    && chown lawmind:lawmind /app/data /app/data/chroma /app/logs
+# Chroma writes its default embedding model under $HOME/.cache/chroma. Pre-create
+# it owned by the runtime user so a named volume mounted there stays writable.
+RUN mkdir -p /app/data/chroma /app/logs /home/lawmind/.cache/chroma \
+    && chown -R lawmind:lawmind /app/data /app/logs /home/lawmind/.cache
 
 USER lawmind
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 CMD ["python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

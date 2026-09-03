@@ -71,6 +71,11 @@ services:
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}"
       APP_ENV: "${APP_ENV:-production}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      # Chroma downloads its default embedding model (~79MB) from inside this
+      # container and the download has no resume, so every recreate re-fetches it
+      # and startup can hang on a slow link. Keep the cache in a named volume.
+      - chroma-onnx-cache:/home/lawmind/.cache/chroma
     depends_on:
       lawmind-postgres:
         condition: service_healthy
@@ -84,7 +89,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      # A cold cache still has to fetch the embedding model before /health can
+      # pass; 60s was short enough to mark the API unhealthy mid-download.
+      start_period: 300s
 
   lawmind-frontend:
     build:
@@ -111,3 +118,4 @@ volumes:
   postgres-data:
   redis-data:
   chromadb-data:
+  chroma-onnx-cache:
