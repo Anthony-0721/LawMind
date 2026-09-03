@@ -878,7 +878,13 @@ async def law_chat(
                 await profile_call
 
     intent_value = _enum_value(_value_or_none(result, "intent", intent))
-    intent_group = str(_value_or_none(result, "intent_group", "") or "")
+    # OrchestratorResult carries no intent_group, so fall back to the value the
+    # intent layer already resolved and was passed into the orchestration request.
+    intent_group = str(
+        _value_or_none(result, "intent_group", "")
+        or _value_or_none(orc_body, "intent_group", "")
+        or ""
+    )
     entity_source = _value_or_none(result, "entities", entities) or entities
     legal_domain = (
         _first_entity_value(entity_source, "legal_domain")

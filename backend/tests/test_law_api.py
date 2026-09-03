@@ -844,6 +844,7 @@ def test_law_chat_uses_whitelisted_response_and_server_token():
     assert data["escalated"] is False
     assert data["missing_facts"] == ["incident_time"]
     assert data["consultation_draft_id"] == "draft-1"
+    assert data["intent_group"] == "criminal"
     assert "agent_type" not in data
     assert "entities" not in data
     assert "phone" not in data
