@@ -70,38 +70,32 @@ class AgentProfile:
     max_tokens: int = 1024
 
 
-_LEGACY_ENV_PREFIX = "RETIRED_"
-
 _CLARIFICATION_RESPONSE = (
     "我还不能确定您希望咨询哪个法律领域。请补充是刑事辩护、劳动争议、婚姻家事、合同纠纷、交通事故、民间借贷，还是需要预约律师？"
 )
 
 
-def _env_raw(name: str, default: str) -> str:
-    """Read current LAWMIND config, then fall back to the legacy deployment env name."""
+def _env_str(name: str, default: str) -> str:
+    """Read a LAWMIND config value; unset and empty both fall back to the default."""
     value = os.getenv(name)
-    if value not in (None, ""):
-        return value
-    suffix = name[len("LAWMIND_"):] if name.startswith("LAWMIND_") else name
-    legacy = os.getenv(_LEGACY_ENV_PREFIX + suffix, default)
-    return legacy if legacy not in (None, "") else default
+    return value if value not in (None, "") else default
 
 
 def _env_float(name: str, default: float) -> float:
     """读取可选浮点配置；错误配置不应阻塞服务启动。"""
     try:
-        return float(_env_raw(name, str(default)))
+        return float(_env_str(name, str(default)))
     except (TypeError, ValueError):
-        logger.warning("忽略非法浮点配置 %s=%r", name, _env_raw(name, str(default)))
+        logger.warning("忽略非法浮点配置 %s=%r", name, _env_str(name, str(default)))
         return default
 
 
 def _env_int(name: str, default: int) -> int:
     """读取可选整数配置；错误配置不应阻塞服务启动。"""
     try:
-        return int(_env_raw(name, str(default)))
+        return int(_env_str(name, str(default)))
     except (TypeError, ValueError):
-        logger.warning("忽略非法整数配置 %s=%r", name, _env_raw(name, str(default)))
+        logger.warning("忽略非法整数配置 %s=%r", name, _env_str(name, str(default)))
         return default
 
 
@@ -1021,11 +1015,7 @@ class AgentOrchestrator:
         profile = agent_cls.profile
         agent_env_name = f"{agent_cls.agent_type.value.upper()}_MODEL"
         env_name = "LAWMIND_" + agent_env_name
-        model = (
-            os.getenv(env_name, "").strip()
-            or os.getenv(_LEGACY_ENV_PREFIX + agent_env_name, "").strip()
-            or profile.model
-        )
+        model = os.getenv(env_name, "").strip() or profile.model
         configured_profile = replace(profile, model=model) if model else profile
         kwargs: Dict[str, Any] = {"profile": configured_profile}
         if agent_cls is EscalationAgent:

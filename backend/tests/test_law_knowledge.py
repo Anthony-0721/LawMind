@@ -223,57 +223,55 @@ def test_escalation_skill_injects_without_message_keywords():
     assert "人工升级与留资规范" in prompt
 
 
-def test_per_agent_model_env_fallback(monkeypatch):
+def test_per_agent_model_env_ignores_legacy_prefix(monkeypatch):
     from agents.agent_orchestrator import AgentOrchestrator, CriminalDefenseAgent
 
     primary = "LAWMIND_CRIMINAL_MODEL"
-    legacy = LEGACY_ENV_PREFIX + "CRIMINAL_MODEL"
     monkeypatch.setenv(primary, "lawmind-criminal-model")
-    monkeypatch.setenv(legacy, "legacy-criminal-model")
+    monkeypatch.setenv(LEGACY_ENV_PREFIX + "CRIMINAL_MODEL", "legacy-criminal-model")
     agent = AgentOrchestrator._make_agent(
         CriminalDefenseAgent, None, "default-model", None
     )
     assert agent._model == "lawmind-criminal-model"
 
+    # The retired deployment name must never be honoured again.
     monkeypatch.delenv(primary)
     agent = AgentOrchestrator._make_agent(
         CriminalDefenseAgent, None, "default-model", None
     )
-    assert agent._model == "legacy-criminal-model"
+    assert agent._model == "default-model"
 
 
-def test_backward_compatible_env_fallback(monkeypatch):
+def test_api_env_readers_ignore_legacy_prefix(monkeypatch):
     import api.main as api_main
 
     primary = "LAWMIND_SKILLS_DIR"
-    legacy = LEGACY_ENV_PREFIX + "SKILLS_DIR"
     monkeypatch.setenv(primary, "/primary/skills")
-    monkeypatch.setenv(legacy, "/legacy/skills")
-    assert api_main._env_or_legacy(primary, "/default") == "/primary/skills"
+    monkeypatch.setenv(LEGACY_ENV_PREFIX + "SKILLS_DIR", "/legacy/skills")
+    assert api_main._env_str(primary, "/default") == "/primary/skills"
+
     monkeypatch.delenv(primary)
-    assert api_main._env_or_legacy(primary, "/default") == "/legacy/skills"
-    monkeypatch.delenv(legacy)
-    assert api_main._env_or_legacy(primary, "/default") == "/default"
+    assert api_main._env_str(primary, "/default") == "/default"
 
     primary_int = "LAWMIND_SKILLS_MAX_PROMPT_CHARS"
-    legacy_int = LEGACY_ENV_PREFIX + "SKILLS_MAX_PROMPT_CHARS"
     monkeypatch.setenv(primary_int, "9000")
-    monkeypatch.setenv(legacy_int, "7000")
-    assert api_main._env_int_or_legacy(primary_int, 5000) == 9000
-    monkeypatch.delenv(primary_int)
-    assert api_main._env_int_or_legacy(primary_int, 5000) == 7000
+    monkeypatch.setenv(LEGACY_ENV_PREFIX + "SKILLS_MAX_PROMPT_CHARS", "7000")
+    assert api_main._env_int(primary_int, 5000) == 9000
+
+    monkeypatch.setenv(primary_int, "not-a-number")
+    assert api_main._env_int(primary_int, 5000) == 5000
 
 
-def test_agent_orchestrator_env_fallback(monkeypatch):
+def test_orchestrator_env_reader_ignores_legacy_prefix(monkeypatch):
     from agents.agent_orchestrator import _env_int
 
     primary = "LAWMIND_TOOL_TRACE_MAX"
-    legacy = LEGACY_ENV_PREFIX + "TOOL_TRACE_MAX"
     monkeypatch.setenv(primary, "777")
-    monkeypatch.setenv(legacy, "321")
+    monkeypatch.setenv(LEGACY_ENV_PREFIX + "TOOL_TRACE_MAX", "321")
     assert _env_int(primary, 200) == 777
+
     monkeypatch.delenv(primary)
-    assert _env_int(primary, 200) == 321
+    assert _env_int(primary, 200) == 200
 
 
 def test_no_old_brand_or_real_like_pii_in_backend_seeds():
